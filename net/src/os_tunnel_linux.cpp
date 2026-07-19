@@ -12,8 +12,8 @@
 static const ag::Logger logger("OS_TUNNEL_LINUX");
 
 static constexpr auto TABLE_ID = 880;
-static constexpr std::string_view PRIVILEGED_PORTS = "1-1024";
-static constexpr std::string_view VNC_PORTS = "5900-5920";
+static constexpr std::string_view LEGACY_PRIVILEGED_PORTS = "1-1024";
+static constexpr std::string_view LEGACY_VNC_PORTS = "5900-5920";
 
 static bool sys_cmd_bool(std::string cmd) {
     cmd += " 2>&1";
@@ -83,13 +83,6 @@ ag::VpnError ag::VpnLinuxTunnel::init(const ag::VpnOsTunnelSettings *settings, s
     setup_if();
 
     if (managed_routing) {
-        m_sport_supported = check_sport_rule_support();
-        if (m_settings->use_existing && !m_sport_supported) {
-            errlog(logger,
-                    "Managed routing for an existing TUN device requires sport rule support; "
-                    "set included_routes = [] to leave routing external");
-            return {-1, "Managed routing for an existing TUN device requires sport rule support"};
-        }
         teardown_routes(TABLE_ID); // Remove stale rules from previous sessions
         if (!setup_routes(TABLE_ID)) {
             return {-1, "Unable to setup routes for linuxtun session"};
@@ -213,33 +206,13 @@ void ag::VpnLinuxTunnel::setup_if() {
     }
 }
 
-bool ag::VpnLinuxTunnel::check_sport_rule_support() {
-    // Check IPv4 sport rule support
-    auto result = ag::tunnel_utils::fsystem_with_output("ip rule show sport 65535");
-    if (!result.has_value()) {
-        dbglog(logger, "IPv4 sport rule not supported: {}", result.error()->str());
-        return false;
-    }
-
-    // If IPv6 is available, also check IPv6 sport rule support
-    if (m_ipv6_available) {
-        auto result_v6 = ag::tunnel_utils::fsystem_with_output("ip -6 rule show sport 65535");
-        if (!result_v6.has_value()) {
-            dbglog(logger, "IPv6 sport rule not supported: {}", result_v6.error()->str());
-            return false;
-        }
-    }
-
-    return true;
-}
-
 bool ag::VpnLinuxTunnel::setup_routes(int16_t table_id) {
     std::vector<ag::CidrRange> ipv4_routes;
     std::vector<ag::CidrRange> ipv6_routes;
     ag::tunnel_utils::get_setup_routes(
             ipv4_routes, ipv6_routes, m_settings->included_routes, m_settings->excluded_routes);
 
-    std::string table_name = m_sport_supported ? std::to_string(table_id) : "main";
+    std::string table_name = std::to_string(table_id);
 
     if (!m_ipv6_available) {
         ipv6_routes.clear();
@@ -276,20 +249,14 @@ bool ag::VpnLinuxTunnel::setup_routes(int16_t table_id) {
     }
 
     // Apply routing rules (in netns if specified)
-    if (m_sport_supported) {
-        if (!ipv4_routes.empty()) {
-            if (!sys_cmd_netns(m_netns, AG_FMT("ip rule add prio 30800 sport {} lookup main", PRIVILEGED_PORTS))
-                    || !sys_cmd_netns(m_netns, AG_FMT("ip rule add prio 30800 sport {} lookup main", VNC_PORTS))
-                    || !sys_cmd_netns(m_netns, AG_FMT("ip rule add prio 30801 lookup {}", table_id))) {
-                return false;
-            }
+    if (!ipv4_routes.empty()) {
+        if (!sys_cmd_netns(m_netns, AG_FMT("ip rule add prio 30801 lookup {}", table_id))) {
+            return false;
         }
-        if (!ipv6_routes.empty()) {
-            if (!sys_cmd_netns(m_netns, AG_FMT("ip -6 rule add prio 30800 sport {} lookup main", PRIVILEGED_PORTS))
-                    || !sys_cmd_netns(m_netns, AG_FMT("ip -6 rule add prio 30800 sport {} lookup main", VNC_PORTS))
-                    || !sys_cmd_netns(m_netns, AG_FMT("ip -6 rule add prio 30801 lookup {}", table_id))) {
-                return false;
-            }
+    }
+    if (!ipv6_routes.empty()) {
+        if (!sys_cmd_netns(m_netns, AG_FMT("ip -6 rule add prio 30801 lookup {}", table_id))) {
+            return false;
         }
     }
     return true;
@@ -353,13 +320,15 @@ void ag::VpnLinuxTunnel::teardown_routes(int16_t table_id) {
     sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip route flush table {}", table_id));
     sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip -6 route flush table {}", table_id));
 
-    // Try to remove rules regardless of m_sport_supported (may exist from previous session)
+    // Remove project rules and best-effort legacy exemptions from older clients.
     sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip rule del prio 30801 lookup {}", table_id));
-    sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip rule del prio 30800 sport {} lookup main", PRIVILEGED_PORTS));
-    sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip rule del prio 30800 sport {} lookup main", VNC_PORTS));
+    sys_cmd_netns_ignore_errors(
+            m_netns, AG_FMT("ip rule del prio 30800 sport {} lookup main", LEGACY_PRIVILEGED_PORTS));
+    sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip rule del prio 30800 sport {} lookup main", LEGACY_VNC_PORTS));
     sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip -6 rule del prio 30801 lookup {}", table_id));
-    sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip -6 rule del prio 30800 sport {} lookup main", PRIVILEGED_PORTS));
-    sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip -6 rule del prio 30800 sport {} lookup main", VNC_PORTS));
+    sys_cmd_netns_ignore_errors(
+            m_netns, AG_FMT("ip -6 rule del prio 30800 sport {} lookup main", LEGACY_PRIVILEGED_PORTS));
+    sys_cmd_netns_ignore_errors(m_netns, AG_FMT("ip -6 rule del prio 30800 sport {} lookup main", LEGACY_VNC_PORTS));
 }
 
 void *ag::vpn_linux_tunnel_create(ag::VpnOsTunnelSettings *settings) {
