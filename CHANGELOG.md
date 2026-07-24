@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added `http2_connections_num` to configure the maximum number of parallel HTTP/2 sessions.
+
 ### Changed
 
 ### Deprecated

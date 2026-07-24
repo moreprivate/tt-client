@@ -222,6 +222,11 @@ typedef struct {
      */
     VpnUpstreamProtocol main_protocol;
     /**
+     * Number of parallel HTTP/2 sessions. If 0, the default value will be used.
+     * Ignored when `main_protocol` is not `VPN_UP_HTTP2`.
+     */
+    uint32_t http2_connections_num;
+    /**
      * A location to connect to. An endpoint is selected by the location ping algorithm,
      * see `locations_pinger_t` for details.
      */
