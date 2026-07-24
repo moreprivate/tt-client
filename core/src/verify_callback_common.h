@@ -30,8 +30,13 @@ inline VerifyCallbackResult verify_endpoint_cert(X509_STORE_CTX *store_ctx, VpnC
             ? vpn->upstream_config.endpoint->remote_id
             : vpn->upstream_config.endpoint->name;
 
-    int ret = vpn->parameters.cert_verify_handler.func(host_name, (sockaddr *) &vpn->upstream_config.endpoint->address,
-            {cert, chain, ssl, VT_ENDPOINT}, vpn->parameters.cert_verify_handler.arg);
+    const sockaddr *verification_address = (const sockaddr *) &vpn->upstream_config.verification_address;
+    if (verification_address->sa_family == AF_UNSPEC) {
+        verification_address = (const sockaddr *) &vpn->upstream_config.endpoint->address;
+    }
+
+    int ret = vpn->parameters.cert_verify_handler.func(
+            host_name, verification_address, {cert, chain, ssl, VT_ENDPOINT}, vpn->parameters.cert_verify_handler.arg);
 
     return {ret, host_name, cert, chain};
 }

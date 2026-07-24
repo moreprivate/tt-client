@@ -28,9 +28,7 @@ static constexpr uint32_t DEFAULT_MTU = 1350;
 static const Logger g_logger("TRUSTTUNNEL_CLIENT"); // NOLINT(readability-identifier-naming)
 
 static const std::unordered_map<std::string_view, VpnUpstreamProtocol> UPSTREAM_PROTO_MAP = {
-        {"auto", VPN_UP_AUTO},
         {"http2", VPN_UP_HTTP2},
-        {"http3", VPN_UP_HTTP3},
 };
 
 static const std::unordered_map<std::string_view, VpnMode> VPN_MODE_MAP = {
@@ -131,7 +129,7 @@ static std::optional<TrustTunnelConfig::Location> build_endpoint(const toml::tab
             upstream_protocol && UPSTREAM_PROTO_MAP.contains(*upstream_protocol)) {
         location.upstream_protocol = UPSTREAM_PROTO_MAP.at(*upstream_protocol);
     } else {
-        errlog(g_logger, "Unexpected endpoint upstream protocol value: {}",
+        errlog(g_logger, "Only upstream_protocol = \"http2\" is supported; got {}",
                 streamable_to_string(config["upstream_protocol"]));
         return std::nullopt;
     }

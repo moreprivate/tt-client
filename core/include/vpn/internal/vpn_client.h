@@ -80,6 +80,8 @@ struct EndpointConnectionConfig {
     VpnUpstreamProtocolConfig main_protocol;
     VpnUpstreamFallbackConfig fallback;
     AutoVpnEndpoint endpoint;
+    /** Original endpoint address used for certificate identity checks when `endpoint` is a relay. */
+    SocketAddressStorage verification_address = {};
     std::chrono::milliseconds timeout{VPN_DEFAULT_ENDPOINT_UPSTREAM_TIMEOUT_MS};
     std::chrono::milliseconds health_check_timeout{VPN_DEFAULT_HEALTH_CHECK_TIMEOUT_MS};
     std::string username;
