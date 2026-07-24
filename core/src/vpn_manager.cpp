@@ -97,6 +97,7 @@ vpn_client::Parameters Vpn::make_client_parameters() const {
 vpn_client::EndpointConnectionConfig Vpn::make_client_upstream_config() const {
     // NOLINTBEGIN(bugprone-unchecked-optional-access)
     AutoVpnEndpoint endpoint = vpn_endpoint_clone(this->selected_endpoint.value().endpoint.get());
+    SocketAddressStorage verification_address = endpoint->address;
     if (this->selected_endpoint->relay.has_value()) {
         AutoVpnRelay relay = vpn_relay_clone(this->selected_endpoint->relay.value().get());
         // NOLINTEND(bugprone-unchecked-optional-access)
@@ -113,6 +114,7 @@ vpn_client::EndpointConnectionConfig Vpn::make_client_upstream_config() const {
                     VpnUpstreamProtocolConfig{.type = this->client.quic_connector ? VPN_UP_HTTP3 : VPN_UP_HTTP2},
             .fallback = VpnUpstreamFallbackConfig{},
             .endpoint = std::move(endpoint),
+            .verification_address = verification_address,
             .timeout = Millis{this->upstream_config->timeout_ms},
             .health_check_timeout = Millis{this->upstream_config->health_check_timeout_ms},
             .username = this->upstream_config->username,
@@ -718,11 +720,17 @@ static int ssl_verify_callback(const char *host_name, const sockaddr *host_ip, c
 #endif
     }
 
-    if ((host_name != nullptr || (host_ip != nullptr && host_ip->sa_family != AF_UNSPEC))
-            && (host_name == nullptr || !tls_verify_cert_host_name(ctx.cert, host_name))
-            && (host_ip == nullptr || host_ip->sa_family == AF_UNSPEC
-                    || !tls_verify_cert_ip(ctx.cert, SocketAddress(host_ip).str().c_str()))) {
-        log_vpn(vpn, warn, "Server host name or IP doesn't match certificate. Expected host: '{}', IP: '{}'",
+    bool identity_matches = true;
+    if (host_name != nullptr) {
+        SocketAddress identity(host_name);
+        identity_matches = identity.valid()
+                ? tls_verify_cert_ip(ctx.cert, identity.host_str(false).c_str())
+                : tls_verify_cert_host_name(ctx.cert, host_name);
+    } else if (host_ip != nullptr && host_ip->sa_family != AF_UNSPEC) {
+        identity_matches = tls_verify_cert_ip(ctx.cert, SocketAddress(host_ip).host_str(false).c_str());
+    }
+    if (!identity_matches) {
+        log_vpn(vpn, warn, "Server identity doesn't match certificate. Expected host: '{}', IP: '{}'",
                 host_name ? host_name : "<null>",
                 (host_ip && host_ip->sa_family != AF_UNSPEC) ? SocketAddress(host_ip).str().c_str() : "<none>");
         log_vpn(vpn, warn, "  {}", ag::tls::get_cert_diagnostic_info(ctx.cert, nullptr));

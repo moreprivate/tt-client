@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Prevented endpoint certificate-verification bypass through pinger handoff, TLS session reuse, or mismatched configured identities.
+
 ### Security
 
 ## [1.1.5-rc.5] - 2026-08-12

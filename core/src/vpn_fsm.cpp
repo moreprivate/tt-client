@@ -298,7 +298,9 @@ static void run_ping(void *ctx, void *) {
             .rounds = 1,
             .main_protocol = vpn->upstream_config->main_protocol,
             .anti_dpi = vpn->upstream_config->anti_dpi,
-            .handoff = true,
+            // HTTP/2 pings do not verify endpoint certificates, so their TLS connections
+            // must not be handed to the verified endpoint upstream.
+            .handoff = vpn->upstream_config->main_protocol == VPN_UP_HTTP3,
             .quic_max_idle_timeout_ms = quic_max_idle_timeout,
             .quic_version = 0,
     };

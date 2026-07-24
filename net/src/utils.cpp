@@ -919,8 +919,9 @@ std::variant<SslPtr, std::string> make_ssl(int (*verification_callback)(X509_STO
         U8View alpn_protos, const char *sni, MakeSslProtocolType type, U8View endpoint_data, U8View tls_client_random,
         U8View tls_client_random_mask) {
     bool quic = type == MSPT_NGTCP2;
+    bool verification_enabled = verification_callback != nullptr && arg != nullptr;
     DeclPtr<SSL_CTX, SSL_CTX_free> ctx{SSL_CTX_new(TLS_client_method())};
-    if (verification_callback && arg) {
+    if (verification_enabled) {
         SSL_CTX_set_verify(ctx.get(), SSL_VERIFY_PEER, nullptr);
         SSL_CTX_set_cert_verify_callback(ctx.get(), verification_callback, arg);
     }
@@ -928,8 +929,12 @@ std::variant<SslPtr, std::string> make_ssl(int (*verification_callback)(X509_STO
         return "Failed to set ALPN protocols";
     }
 
-    SSL_CTX_set_session_cache_mode(ctx.get(), SSL_SESS_CACHE_CLIENT);
-    SSL_CTX_sess_set_new_cb(ctx.get(), quic ? cache_session_quic_cb : cache_session_tcp_cb);
+    if (verification_enabled) {
+        SSL_CTX_set_session_cache_mode(ctx.get(), SSL_SESS_CACHE_OFF);
+    } else {
+        SSL_CTX_set_session_cache_mode(ctx.get(), SSL_SESS_CACHE_CLIENT);
+        SSL_CTX_sess_set_new_cb(ctx.get(), quic ? cache_session_quic_cb : cache_session_tcp_cb);
+    }
 
 // Mimic Chrome's ClientHello if we are using BoringSSL.
 #ifdef OPENSSL_IS_BORINGSSL
@@ -1052,8 +1057,10 @@ std::variant<SslPtr, std::string> make_ssl(int (*verification_callback)(X509_STO
 
     SSL_set_connect_state(ssl.get());
 
-    if (auto session = pop_session_from_cache(sni, quic)) {
-        SSL_set_session(ssl.get(), session.get()); // Callee uprefs session.
+    if (!verification_enabled) {
+        if (auto session = pop_session_from_cache(sni, quic)) {
+            SSL_set_session(ssl.get(), session.get()); // Callee uprefs session.
+        }
     }
 
 #ifdef __mips__
