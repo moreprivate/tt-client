@@ -279,6 +279,7 @@ Error<TrustTunnelClient::ConnectResultError> TrustTunnelClient::connect_to_serve
             .upstream_config =
                     {
                             .main_protocol = m_config.location.upstream_protocol,
+                            .http2_connections_num = m_config.location.http2_connections_num,
                             .location =
                                     {
                                             .id = "hello-location",

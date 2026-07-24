@@ -25,6 +25,7 @@
 using namespace ag; // NOLINT(google-build-using-namespace)
 
 static constexpr uint32_t DEFAULT_MTU = 1350;
+static constexpr uint32_t MAX_HTTP2_CONNECTIONS_NUM = 8;
 static const Logger g_logger("TRUSTTUNNEL_CLIENT"); // NOLINT(readability-identifier-naming)
 
 static const std::unordered_map<std::string_view, VpnUpstreamProtocol> UPSTREAM_PROTO_MAP = {
@@ -132,6 +133,17 @@ static std::optional<TrustTunnelConfig::Location> build_endpoint(const toml::tab
         errlog(g_logger, "Only upstream_protocol = \"http2\" is supported; got {}",
                 streamable_to_string(config["upstream_protocol"]));
         return std::nullopt;
+    }
+
+    if (config.contains("http2_connections_num")) {
+        auto connections_num = config["http2_connections_num"].value<int64_t>();
+        if (!connections_num || *connections_num < 0
+                || *connections_num > static_cast<int64_t>(MAX_HTTP2_CONNECTIONS_NUM)) {
+            errlog(g_logger, "http2_connections_num must be an integer between 0 and {}",
+                    MAX_HTTP2_CONNECTIONS_NUM);
+            return std::nullopt;
+        }
+        location.http2_connections_num = static_cast<uint32_t>(*connections_num);
     }
 
     // Parse client random (format: "prefix[/mask]")
