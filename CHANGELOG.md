@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - Prevented endpoint certificate-verification bypass through pinger handoff, TLS session reuse, or mismatched configured identities.
+- Prevented MIPSEL client startup crashes by disabling OpenSSL MIPS assembly in Zig/LLD builds.
 
 ### Security
 
