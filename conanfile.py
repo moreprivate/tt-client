@@ -61,6 +61,8 @@ class VpnLibsConan(ConanFile):
         # Resolve conflict between pcre2 required from dns-libs and pcre2 required form native_libs_common
         self.options["pcre2"].build_pcre2grep = False
         self.options["dns-libs"].tcpip = False
+        if str(self.settings.arch) == "mipsel":
+            self.options["openssl"].no_asm = True
 
     def export(self):
         # The exported sources carry no .git, so the build's git describe would
