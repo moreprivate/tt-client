@@ -93,16 +93,18 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 }
 
-publishing {
-    publications {
-        register<MavenPublication>("release") {
-            from(components["release"])
+afterEvaluate {
+    publishing {
+        publications {
+            register<MavenPublication>("release") {
+                from(components["release"])
+            }
         }
-    }
-    repositories {
-        maven {
-            name = "ttClientMaven"
-            url = uri(layout.buildDirectory.dir("maven-repo"))
+        repositories {
+            maven {
+                name = "ttClientMaven"
+                url = uri(layout.buildDirectory.dir("maven-repo"))
+            }
         }
     }
 }
