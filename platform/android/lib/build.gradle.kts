@@ -76,6 +76,9 @@ android {
             version = "3.31.6"
         }
     }
+    publishing {
+        singleVariant("release")
+    }
 }
 
 dependencies {
@@ -98,6 +101,7 @@ afterEvaluate {
         publications {
             register<MavenPublication>("release") {
                 from(components["release"])
+                artifactId = "tt-client-android"
             }
         }
         repositories {
