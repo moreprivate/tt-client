@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     kotlin("plugin.serialization") version "2.2.0"
+    `maven-publish`
 }
 
 // Resolve the library version: -PttClientVersion / TT_CLIENT_VERSION env var ->
@@ -90,4 +91,18 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+}
+
+publishing {
+    publications {
+        register<MavenPublication>("release") {
+            from(components["release"])
+        }
+    }
+    repositories {
+        maven {
+            name = "ttClientMaven"
+            url = uri(layout.buildDirectory.dir("maven-repo"))
+        }
+    }
 }
