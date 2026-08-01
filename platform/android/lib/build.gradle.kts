@@ -2,7 +2,6 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     kotlin("plugin.serialization") version "2.2.0"
-    id("maven-publish")
 }
 
 // Resolve the library version: -PttClientVersion / TT_CLIENT_VERSION env var ->
@@ -31,6 +30,7 @@ fun resolveTtClientVersion(project: Project): String {
 }
 
 val ttClientVersion = resolveTtClientVersion(project)
+group = "com.moreprivate.trusttunnel"
 version = ttClientVersion
 
 android {
@@ -72,6 +72,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.6"
         }
     }
 }
@@ -89,30 +90,4 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
-}
-
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
-                groupId = "com.adguard.trusttunnel"
-                artifactId = "trusttunnel-client-android"
-            }
-        }
-        repositories {
-            maven {
-                name = "GitHubPackages"
-                url = uri("https://maven.pkg.github.com/TrustTunnel/TrustTunnelClient")
-                credentials {
-                    username = providers.gradleProperty("gpr.user")
-                        .orElse(providers.environmentVariable("USERNAME"))
-                        .orNull
-                    password = providers.gradleProperty("gpr.key")
-                        .orElse(providers.environmentVariable("TOKEN"))
-                        .orNull
-                }
-            }
-        }
-    }
 }
