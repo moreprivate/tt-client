@@ -7,6 +7,8 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.net.VpnService
 import android.os.Bundle
+import android.hardware.display.DisplayManager
+import android.view.Display
 import android.view.Surface
 import java.util.concurrent.TimeoutException
 
@@ -21,7 +23,10 @@ class VpnPrepareActivity : Activity() {
 
         // We lock an activity orientation to save the state of previous activity
         try {
-            when (windowManager.defaultDisplay.rotation) {
+            val rotation = getSystemService(DisplayManager::class.java)
+                ?.getDisplay(Display.DEFAULT_DISPLAY)
+                ?.rotation ?: Surface.ROTATION_0
+            when (rotation) {
                 Surface.ROTATION_180 -> requestedOrientation =
                     ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
 
