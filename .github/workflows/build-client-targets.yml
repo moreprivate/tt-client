@@ -1,0 +1,438 @@
+name: Build client targets
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_runner:
+        description: Runner for validation and build jobs
+        required: true
+        default: self-hosted
+        type: choice
+        options:
+          - self-hosted
+          - github-hosted
+      delete_existing:
+        description: Delete an existing release/tag with the same source version
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-update-client
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Resolve patch source
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.result.outputs.source_sha }}
+      short_sha: ${{ steps.result.outputs.short_sha }}
+      release_tag: ${{ steps.result.outputs.release_tag }}
+
+    steps:
+      - name: Check out patch branch
+        uses: actions/checkout@v6
+        with:
+          ref: privacy/client-hardening
+          fetch-depth: 0
+
+      - name: Resolve source commit
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-list -1 HEAD -- . ':(exclude).github/**')"
+          test -n "${SOURCE_SHA}"
+          SHORT_SHA="$(git rev-parse --short=12 "${SOURCE_SHA}")"
+          COMMIT_EPOCH="$(git show -s --format=%ct "${SOURCE_SHA}")"
+          COMMIT_STAMP="$(date -u --date="@${COMMIT_EPOCH}" +%Y%m%dT%H%M%SZ)"
+          RELEASE_TAG="${COMMIT_STAMP}-${SHORT_SHA}"
+          echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Validate client
+    needs: source
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.build_runner == 'self-hosted' && 'docker-runner' || 'ubuntu-24.04' }}
+    timeout-minutes: 360
+    container:
+      image: adguard/core-libs:2.12
+    env:
+      CONAN_HOME: ${{ github.workspace }}/.conan2
+      CARGO_HOME: /opt/cargo
+
+    steps:
+      - name: Check out source ref
+        uses: actions/checkout@v6
+        with:
+          ref: privacy/client-hardening
+          fetch-depth: 0
+
+      - name: Remove persistent Conan state
+        shell: bash
+        run: rm -rf "${CONAN_HOME}"
+
+      - name: Set up Conan cache
+        uses: actions/cache@v5
+        with:
+          # Share only downloaded archives. Package source/build state is
+          # architecture-specific and remains private to each job.
+          path: ${{ github.workspace }}/.conan2/d/
+          key: conan-downloads-v2-${{ hashFiles('conanfile.py', 'scripts/bootstrap_conan_deps.py', 'scripts/native-libs-common/conan/recipes/**') }}
+
+      - name: Configure build tools
+        shell: bash
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --disable-pip-version-check conan
+          conan profile detect --force
+
+      - name: Bootstrap build dependencies
+        shell: bash
+        run: |
+          . .venv/bin/activate
+          ./scripts/bootstrap_conan_deps.py
+
+      - name: Verify build dependencies
+        shell: bash
+        run: |
+          . .venv/bin/activate
+          conan list 'dns-libs/*@adguard/oss'
+          conan list 'native_libs_common/*@adguard/oss'
+
+      - name: Run client tests
+        shell: bash
+        env:
+          SKIP_BOOTSTRAP: "1"
+          TT_CLIENT_VERSION: ${{ needs.source.outputs.release_tag }}
+        run: |
+          . .venv/bin/activate
+          make test
+
+  build:
+    name: Build client targets
+    needs:
+      - source
+      - validate
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.build_runner == 'self-hosted' && 'docker-runner' || 'ubuntu-24.04' }}
+    timeout-minutes: 360
+    container:
+      image: adguard/core-libs:2.12
+    env:
+      CONAN_HOME: ${{ github.workspace }}/.conan2
+      CARGO_HOME: /opt/cargo
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64
+          - mipsel
+
+    steps:
+      - name: Check out source ref
+        uses: actions/checkout@v6
+        with:
+          ref: privacy/client-hardening
+          fetch-depth: 0
+
+      - name: Remove persistent Conan state
+        shell: bash
+        run: rm -rf "${CONAN_HOME}"
+
+      - name: Cache Conan downloads
+        uses: actions/cache@v5
+        with:
+          # Never share Conan package/source/build state between architectures.
+          path: ${{ github.workspace }}/.conan2/d/
+          key: conan-downloads-v2-${{ hashFiles('conanfile.py', 'scripts/bootstrap_conan_deps.py', 'scripts/native-libs-common/conan/recipes/**') }}
+
+      - name: Configure build tools
+        shell: bash
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --disable-pip-version-check conan
+          conan profile detect --force
+          conan list 'dns-libs/*@adguard/oss'
+          conan list 'native_libs_common/*@adguard/oss'
+          rustup +nightly component add rust-src
+
+      - name: Bootstrap build dependencies
+        shell: bash
+        run: |
+          . .venv/bin/activate
+          ./scripts/bootstrap_conan_deps.py
+
+      - name: Build client
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          PRESET: musl-cross-${{ matrix.arch }}-relwithdebinfo
+          BUILD_DIR: cmake-build-musl-cross-${{ matrix.arch }}-relwithdebinfo
+          SKIP_BOOTSTRAP: "1"
+          TT_CLIENT_VERSION: ${{ needs.source.outputs.release_tag }}
+        run: |
+          . .venv/bin/activate
+          make build_trusttunnel_client
+          grep -Fqx \
+            "TT_CLIENT_VERSION_FULL:INTERNAL=${TT_CLIENT_VERSION}" \
+            "${BUILD_DIR}/CMakeCache.txt"
+          if [[ "${ARCH}" == "mipsel" ]]; then
+            if LC_ALL=C grep -aFq \
+                'SHA256 for MIPS, CRYPTOGAMS' \
+                "${BUILD_DIR}/trusttunnel/trusttunnel_client"; then
+              echo "OpenSSL MIPS assembly unexpectedly present" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Prepare artifact
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_DIR: cmake-build-musl-cross-${{ matrix.arch }}-relwithdebinfo
+          RELEASE_TAG: ${{ needs.source.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.source.outputs.source_sha }}
+        run: |
+          mkdir -p "artifacts/${ARCH}"
+          llvm-strip \
+            -o "artifacts/${ARCH}/tt-client-${RELEASE_TAG}-linux-${ARCH}" \
+            "${BUILD_DIR}/trusttunnel/trusttunnel_client"
+          chmod 755 "artifacts/${ARCH}/tt-client-${RELEASE_TAG}-linux-${ARCH}"
+          (
+            cd "artifacts/${ARCH}"
+            sha256sum "tt-client-${RELEASE_TAG}-linux-${ARCH}" \
+              > "tt-client-${RELEASE_TAG}-linux-${ARCH}.sha256"
+          )
+          printf '%s\n' "${SOURCE_SHA}" > "artifacts/${ARCH}/SOURCE_COMMIT-${ARCH}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tt-client-${{ matrix.arch }}-${{ needs.source.outputs.short_sha }}
+          path: artifacts/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  android:
+    name: Build Android client library
+    needs:
+      - source
+      - validate
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.build_runner == 'self-hosted' && 'docker-runner' || 'ubuntu-24.04' }}
+    timeout-minutes: 360
+    container:
+      image: adguard/core-libs:2.12
+    env:
+      CONAN_HOME: ${{ github.workspace }}/.conan2
+      CARGO_HOME: /opt/cargo
+
+    steps:
+      - name: Check out source ref
+        uses: actions/checkout@v6
+        with:
+          ref: privacy/client-hardening
+          fetch-depth: 0
+
+      - name: Configure Android and native tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install --disable-pip-version-check conan
+          conan profile detect --force
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "${SDKMANAGER}" ]]; then
+            SDK_ROOT="${RUNNER_TEMP}/android-sdk"
+            mkdir -p "${SDK_ROOT}/cmdline-tools"
+            curl --fail --silent --show-error --location \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+              -o "${RUNNER_TEMP}/cmdline-tools.zip"
+            rm -rf "${SDK_ROOT}/cmdline-tools/latest"
+            mkdir -p "${SDK_ROOT}/cmdline-tools/latest"
+            unzip -q "${RUNNER_TEMP}/cmdline-tools.zip" -d "${RUNNER_TEMP}/cmdline-tools-unpacked"
+            mv "${RUNNER_TEMP}/cmdline-tools-unpacked/cmdline-tools/"* \
+              "${SDK_ROOT}/cmdline-tools/latest/"
+            SDKMANAGER="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          test -x "${SDKMANAGER}"
+          if [[ -z "${SDK_ROOT}" ]]; then
+            SDK_ROOT="$(cd "$(dirname "${SDKMANAGER}")/../.." && pwd)"
+          fi
+          echo "ANDROID_HOME=${SDK_ROOT}" >> "${GITHUB_ENV}"
+          echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "${GITHUB_ENV}"
+          echo "PATH=${SDK_ROOT}/cmdline-tools/latest/bin:${SDK_ROOT}/platform-tools:${PATH}" >> "${GITHUB_ENV}"
+          echo /opt/cargo/bin >> "$GITHUB_PATH"
+          yes | "${SDKMANAGER}" --licenses >/dev/null || true
+          "${SDKMANAGER}" 'platforms;android-35' 'build-tools;35.0.0' \
+            'ndk;29.0.14206865' 'cmake;3.31.6'
+          rustup target add aarch64-linux-android armv7-linux-androideabi \
+            x86_64-linux-android i686-linux-android
+          cargo install --locked cargo-ndk
+          ./scripts/bootstrap_conan_deps.py
+
+      - name: Build and publish Android library
+        shell: bash
+        env:
+          TT_CLIENT_VERSION: ${{ needs.source.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          . .venv/bin/activate
+          mkdir -p platform/android
+          printf 'cmake.dir=%s\n' "${ANDROID_SDK_ROOT}/cmake/3.31.6" > platform/android/local.properties
+          cd platform/android
+          ./gradlew :lib:publishReleasePublicationToTtClientMavenRepository --no-daemon
+
+      - name: Package Android Maven repository
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.source.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/android
+          printf '%s\n' "${SOURCE_SHA}" > artifacts/android/SOURCE_COMMIT-android
+          tar -C platform/android/lib/build/maven-repo -czf \
+            "artifacts/android/tt-client-android-${RELEASE_TAG}.tar.gz" .
+          (
+            cd artifacts/android
+            sha256sum "tt-client-android-${RELEASE_TAG}.tar.gz" \
+              > "tt-client-android-${RELEASE_TAG}.tar.gz.sha256"
+          )
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tt-client-android-${{ needs.source.outputs.short_sha }}
+          path: artifacts/android/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create release
+    needs:
+      - source
+      - build
+      - android
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out released source
+        uses: actions/checkout@v6
+        with:
+          ref: privacy/client-hardening
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tt-client-*
+          path: release
+          merge-multiple: true
+
+      - name: Create immutable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.source.outputs.release_tag }}
+          SOURCE_REPO: ${{ github.repository }}
+          DELETE_EXISTING: ${{ inputs.delete_existing || false }}
+        run: |
+          set -euo pipefail
+          case "${RELEASE_TAG}" in
+            *[!A-Za-z0-9._-]*|'')
+              echo "Invalid release tag: ${RELEASE_TAG}" >&2
+              exit 1
+              ;;
+          esac
+          release_exists=0
+          tag_exists=0
+          gh release view "${RELEASE_TAG}" >/dev/null 2>&1 && release_exists=1 || true
+          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1 && tag_exists=1 || true
+          if [[ "${DELETE_EXISTING}" == true ]]; then
+            if (( release_exists )); then
+              gh release delete "${RELEASE_TAG}" --yes --cleanup-tag
+              release_exists=0
+              tag_exists=0
+            elif (( tag_exists )); then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}"
+              tag_exists=0
+            fi
+          elif (( release_exists || tag_exists )); then
+            echo "Release/tag already exists: ${RELEASE_TAG}; pass delete_existing=true to replace it" >&2
+            exit 1
+          fi
+
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          (
+            cd release
+          find . -maxdepth 1 -type f \
+              \( -name "tt-client-${RELEASE_TAG}-linux-*" \
+              -o -name "tt-client-android-${RELEASE_TAG}.tar.gz" \) \
+              ! -name '*.sha256' -printf '%f\n' \
+              | sort \
+              | xargs sha256sum > SHA256SUMS
+          )
+          SOURCE_REPO="${SOURCE_REPO}" SOURCE_SHA="${SOURCE_SHA}" RELEASE_TAG="${RELEASE_TAG}" \
+            python3 - <<'PY'
+          import glob
+          import hashlib
+          import json
+          import os
+
+          assets = []
+          for path in sorted(glob.glob("release/tt-client-*-linux-*") +
+                             glob.glob("release/tt-client-android-*.tar.gz")):
+              if path.endswith(".sha256"):
+                  continue
+              with open(path, "rb") as stream:
+                  digest = hashlib.file_digest(stream, "sha256").hexdigest()
+              assets.append({
+                  "name": os.path.basename(path),
+                  "sha256": digest,
+                  "size": os.path.getsize(path),
+              })
+
+          manifest = {
+              "schema": 1,
+              "component": "tt-client",
+              "release_tag": os.environ["RELEASE_TAG"],
+              "source_repository": os.environ["SOURCE_REPO"],
+              "source_commit": os.environ["SOURCE_SHA"],
+              "assets": assets,
+          }
+          with open("release/manifest.json", "w", encoding="utf-8") as stream:
+              json.dump(manifest, stream, indent=2)
+              stream.write("\n")
+          PY
+
+          mapfile -t RELEASE_ASSETS < <(
+            find release -maxdepth 1 -type f \
+              \( \
+                \( -name "tt-client-${RELEASE_TAG}-linux-*" \
+                -o -name "tt-client-android-${RELEASE_TAG}.tar.gz" \) \
+                ! -name '*.sha256' \
+                -o -name "tt-client-${RELEASE_TAG}-linux-*.sha256" \
+                -o -name "tt-client-android-${RELEASE_TAG}.tar.gz.sha256" \
+              \) \
+              | sort
+          )
+          RELEASE_ASSETS+=(release/SHA256SUMS release/manifest.json)
+          gh release create "${RELEASE_TAG}" \
+            --target "${GITHUB_SHA}" \
+            --title "${RELEASE_TAG}" \
+            --notes "Client binaries built from validated ${SOURCE_REPO}@${SOURCE_SHA}." \
+            "${RELEASE_ASSETS[@]}"
