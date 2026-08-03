@@ -11,13 +11,17 @@
 
 using namespace ag;
 
-TEST(H3HealthCheckProbeSkip, SkipsWhenRecentInbound) {
+TEST(HealthCheckProbeSkip, SkipsWhenRecentInbound) {
     // Real shipped helper: skip CONNECT probe under recent data-plane traffic.
-    EXPECT_FALSE(should_skip_h3_health_check_probe(std::nullopt, 7000));
-    EXPECT_TRUE(should_skip_h3_health_check_probe(0, 7000));
-    EXPECT_TRUE(should_skip_h3_health_check_probe(6999, 7000));
-    EXPECT_FALSE(should_skip_h3_health_check_probe(7000, 7000));
-    EXPECT_FALSE(should_skip_h3_health_check_probe(30'000, 7000));
+    EXPECT_FALSE(should_skip_health_check_probe(std::nullopt, 7000));
+    EXPECT_TRUE(should_skip_health_check_probe(0, 7000));
+    EXPECT_TRUE(should_skip_health_check_probe(6999, 7000));
+    EXPECT_FALSE(should_skip_health_check_probe(7000, 7000));
+    EXPECT_FALSE(should_skip_health_check_probe(30'000, 7000));
+    // Busy window uses HC budget, not full 30s endpoint timeout alone.
+    EXPECT_EQ(health_check_busy_skip_max_age_ms(7000, 30000), 7000u);
+    EXPECT_EQ(health_check_busy_skip_max_age_ms(30000, 7000), 7000u);
+    EXPECT_EQ(health_check_busy_skip_max_age_ms(0, 0), 1u);
 }
 
 class TunnelAddressTest : public testing::TestWithParam<std::pair<TunnelAddress, TunnelAddress>> {

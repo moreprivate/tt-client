@@ -12,6 +12,7 @@
 #include "net/tls.h"
 #include "net/utils.h"
 #include "verify_callback_common.h"
+#include "vpn/internal/utils.h"
 #include "vpn/utils.h"
 
 #define log_upstream(ups_, lvl_, fmt_, ...) lvl_##log((ups_)->m_log, "[{}] " fmt_, (ups_)->id, ##__VA_ARGS__)
@@ -403,10 +404,15 @@ void Http2Upstream::net_handler(void *arg, TcpSocketEvent what, void *data) {
                 break;
             }
 
-            // Data receival indicates that the connection is alive.
-            // Cancelling the health check now should reduce the probability
-            // of bogus health check failures due to a slow remote.
-            upstream->cancel_health_check();
+            {
+                using clock = std::chrono::steady_clock;
+                upstream->m_last_inbound_steady_ms =
+                        duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
+            }
+            // Data proves liveness: soft-cancel active HC only (H2 cancel clears timers).
+            if (upstream->m_health_check_info.has_value()) {
+                upstream->cancel_health_check();
+            }
 
             for (uint32_t stream_id : upstream->m_streams_to_reset) {
                 http_session_reset_stream(upstream->m_session.get(), (int32_t) stream_id, NGHTTP2_CANCEL);
@@ -878,6 +884,26 @@ size_t Http2Upstream::connections_num() const {
 
 void Http2Upstream::do_health_check(bool need_result) {
     m_health_check_info.reset(); // Forget about the current health check.
+
+    // Same busy-skip policy as H3: do not open CONNECT while data-plane is active.
+    {
+        using clock = std::chrono::steady_clock;
+        const auto now_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count();
+        std::optional<uint64_t> age_ms;
+        if (m_last_inbound_steady_ms.has_value() && now_ms >= *m_last_inbound_steady_ms) {
+            age_ms = uint64_t(now_ms - *m_last_inbound_steady_ms);
+        }
+        const auto max_age_ms = health_check_busy_skip_max_age_ms(
+                this->vpn->upstream_config.health_check_timeout.count(),
+                this->vpn->upstream_config.timeout.count());
+        if (should_skip_health_check_probe(age_ms, max_age_ms)) {
+            log_upstream(this, dbg,
+                    "Health check: skipped (inbound {}ms ago < busy window {}ms; need_result={})",
+                    age_ms.value_or(0), max_age_ms, need_result);
+            return;
+        }
+    }
 
     log_upstream(this, info, "Health check: starting CONNECT probe (need_result={})", need_result);
     std::optional<uint32_t> stream_id = send_connect_request(NON_ID, &HEALTH_CHECK_HOST, "");

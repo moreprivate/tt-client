@@ -1,6 +1,7 @@
 #pragma once
 
 #include <bitset>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -63,6 +64,8 @@ private:
     HttpIcmpMultiplexer m_icmp_mux;
     std::string m_credentials;
     std::optional<HealthCheckInfo> m_health_check_info;
+    /// Steady-clock ms of last inbound TCP data (busy skip for health CONNECT).
+    std::optional<int64_t> m_last_inbound_steady_ms;
     // It is not safe to reset the stream inside http_session_input() callback,
     // because it may still be used by nghttp2 internals, so collect them here.
     std::vector<uint32_t> m_streams_to_reset;
