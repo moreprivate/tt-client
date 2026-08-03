@@ -35,7 +35,9 @@ static constexpr int VPN_DEFAULT_UDP_TIMEOUT_MS = TCPIP_UDP_TIMEOUT_S * 1000; //
 static constexpr int VPN_DEFAULT_MAX_CONN_BUFFER_FILE_SIZE = 4 * 1024 * 1024;
 static constexpr int VPN_DEFAULT_CONN_MEMORY_BUFFER_THRESHOLD = DEFAULT_CONNECTION_MEMORY_BUFFER_SIZE;
 static constexpr int VPN_DEFAULT_RECOVERY_LOCATION_UPDATE_PERIOD_MS = 10 * 1000;
-static constexpr int VPN_DEFAULT_INITIAL_RECOVERY_INTERVAL_MS = 1 * 1000;
+// First recovery attempt should start immediately; backoff applies to later attempts.
+// (A 1s forced wait + fail-closed kill-switch = "Destination Port Unreachable" on LAN.)
+static constexpr int VPN_DEFAULT_INITIAL_RECOVERY_INTERVAL_MS = 0;
 static constexpr int VPN_DEFAULT_CONNECT_ATTEMPTS_NUM = 5;
 static constexpr int VPN_DEFAULT_FALLBACK_CONNECT_DELAY_MS = 1 * 1000;
 static constexpr int VPN_DEFAULT_POSTPONEMENT_WINDOW_MS = 3 * 1000; // how long after recovery starts connections are postponed instead of bypassed
