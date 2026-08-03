@@ -315,13 +315,12 @@ static void do_report(void *arg) {
         auto it = self->report.begin();
         result.endpoint = it->endpoint.get();
         if (it->best_result_ms.has_value()) {
-            result.is_quic = it->use_quic;
-            if (self->handoff) {
+            result.is_quic = false;
+            if (self->handoff && it->use_quic) {
                 auto qr = it->quic_connector ? quic_connector_get_result(it->quic_connector.get()) : nullptr;
-                if (it->use_quic && qr) {
+                if (qr) {
                     result.conn_state = qr.release();
-                } else {
-                    result.conn_state = it->tcp_socket.release();
+                    result.is_quic = true;
                 }
             }
             if (it->relay->address.sa_family) {
