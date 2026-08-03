@@ -159,14 +159,16 @@ static void vpn_upstream_handler(void *arg, ServerEvent what, void *data) {
         break;
     }
     case SERVER_EVENT_SESSION_CLOSED: {
-        log_client(vpn, dbg, "Server session is closed");
+        // INFO: session death is the primary signal for "LAN blackhole" failures; must not be dbg-only.
+        log_client(vpn, info, "Server session closed (upstream session ended; client will disconnect/recover)");
         vpn->fsm.perform_transition(vpn_client::E_SESSION_CLOSED, nullptr);
         break;
     }
     case SERVER_EVENT_HEALTH_CHECK_ERROR: {
         const VpnError *error = (VpnError *) data;
         assert(error);
-        log_client(vpn, info, "Health check error: {} ({})", error->text, error->code);
+        log_client(vpn, info, "Health check error: {} ({}) — triggering disconnect for recovery",
+                safe_to_string_view(error->text), error->code);
         vpn->fsm.perform_transition(vpn_client::E_HEALTH_CHECK_ERROR, data);
         break;
     }
@@ -176,8 +178,8 @@ static void vpn_upstream_handler(void *arg, ServerEvent what, void *data) {
             break;
         }
 
-        log_client(vpn, dbg, "Server session terminated with error: {} ({})", safe_to_string_view(event->error.text),
-                event->error.code);
+        log_client(vpn, info, "Server session terminated with error: {} ({})",
+                safe_to_string_view(event->error.text), event->error.code);
         vpn->fsm.perform_transition(vpn_client::E_SESSION_ERROR, (void *) &event->error);
         break;
     }
@@ -808,16 +810,15 @@ static void vpn_client::raise_connected(void *ctx, void *) {
 
 static void vpn_client::raise_disconnected(void *ctx, void *) {
     auto *vpn = (VpnClient *) ctx;
-    log_client(vpn, trace, "...");
-
     if (!vpn->pending_error.has_value()) {
+        log_client(vpn, info, "Endpoint client disconnected (no pending error)");
         vpn->parameters.handler.func(vpn->parameters.handler.arg, EVENT_DISCONNECTED, nullptr);
     } else {
+        log_client(vpn, info, "Endpoint client disconnected with error: {} ({})",
+                safe_to_string_view(vpn->pending_error->text), vpn->pending_error->code);
         vpn->parameters.handler.func(vpn->parameters.handler.arg, EVENT_ERROR, &vpn->pending_error.value());
         vpn->pending_error.reset();
     }
-
-    log_client(vpn, trace, "Done");
 }
 
 static void vpn_client::run_disconnect(void *ctx, void *data) {
