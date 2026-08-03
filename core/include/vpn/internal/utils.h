@@ -122,6 +122,22 @@ inline bool operator!=(const TunnelAddressPair &lh, const TunnelAddressPair &rh)
 
 static const TunnelAddress HEALTH_CHECK_HOST(NamePort{"_check", 0});
 
+/**
+ * Skip opening an H3 health-check CONNECT while the session already has recent
+ * inbound data-plane traffic. Opening then RST-ing a probe under bulk multi-stream
+ * load races server H3 body/write-FIN and can kill the whole session (FINAL_SIZE).
+ *
+ * @param last_inbound_age_ms  age of last inbound UDP, or nullopt if never
+ * @param max_age_ms           treat session healthy if age < max_age_ms
+ */
+inline bool should_skip_h3_health_check_probe(
+        std::optional<uint64_t> last_inbound_age_ms, uint64_t max_age_ms) {
+    if (!last_inbound_age_ms.has_value()) {
+        return false;
+    }
+    return *last_inbound_age_ms < max_age_ms;
+}
+
 std::string tunnel_addr_to_str(const TunnelAddress *addr);
 
 /**

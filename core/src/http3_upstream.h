@@ -2,6 +2,7 @@
 
 #include <bitset>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -104,6 +105,8 @@ private:
     ag::Logger m_log{"H3_UPSTREAM"};
     void *m_ssl_object = nullptr; // A non-owning pointer to the SSL object owned by m_h3_client.
     int m_kex_group_nid = NID_undef;
+    /// Steady-clock ms of last inbound UDP (data-plane). Used to skip HC CONNECT under load.
+    std::optional<int64_t> m_last_inbound_steady_ms;
 
     /**
      * A point in time when our idle timer expires.

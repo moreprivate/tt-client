@@ -118,8 +118,8 @@ bool Http3Upstream::open_session(std::optional<Millis>) {
     m_h3_settings.max_window = QUIC_CONNECTION_WINDOW_SIZE;
     m_h3_settings.max_stream_window = QUIC_STREAM_WINDOW_SIZE;
 
-    // Handoff — reuse connection pre-established by ping
-    if (this->vpn->quic_connector->client) {
+    // Handoff — reuse connection pre-established by ping (optional fast path)
+    if (this->vpn->quic_connector && this->vpn->quic_connector->client) {
         m_h3_client = std::move(this->vpn->quic_connector->client);
         std::vector<uint8_t> first_packet = std::move(this->vpn->quic_connector->first_packet);
         m_ssl_object = m_h3_client->get_ssl(); // non-owning; Http3Client owns SSL
@@ -257,7 +257,7 @@ void Http3Upstream::process_handoff_packet(U8View packet) {
 }
 
 void Http3Upstream::close_session() {
-    log_upstream(this, dbg, "...");
+    log_upstream(this, info, "Closing HTTP/3 session (state was {})", magic_enum::enum_name(m_state));
     m_state = H3US_CLOSING;
 
     std::unordered_set<uint64_t> remaining_connections;
@@ -306,7 +306,7 @@ void Http3Upstream::close_session() {
     m_state = H3US_IDLE;
     m_closed = false;
 
-    log_upstream(this, dbg, "Done");
+    log_upstream(this, info, "HTTP/3 session closed (socket and streams released)");
 }
 
 uint64_t Http3Upstream::open_connection(const TunnelAddressPair *addr, int proto, std::string_view app_name) {
@@ -410,6 +410,10 @@ size_t Http3Upstream::available_to_send(uint64_t id) {
         if (capacity == 0) {
             // Ask to be notified once the window reopens.
             it->second.flags.set(TcpConnection::TCF_NEED_NOTIFY_SENT_BYTES);
+            // Window=0 is normal under load; only warn when the session is already gone.
+            if (!m_h3_client) {
+                log_conn(this, id, warn, "available_to_send=0: no h3_client (session already torn down)");
+            }
         }
         return capacity;
     }
@@ -446,11 +450,13 @@ void Http3Upstream::update_flow_control(uint64_t id, TcpFlowCtrlInfo info) {
 }
 
 void Http3Upstream::do_health_check() {
-    m_health_check_info.reset(); // Forget about the current health check.
+    // Drop any previous probe cleanly (RST), then start a new one — unless busy.
+    cancel_health_check();
 
     // FIXME: AG-8909
     if (!m_h3_client || m_state != H3US_ESTABLISHED) {
-        log_upstream(this, warn, "No HTTP3 session");
+        log_upstream(this, warn, "Health check: no HTTP/3 session (client={} state={})",
+                m_h3_client ? "yes" : "null", magic_enum::enum_name(m_state));
         m_health_check_info = {
                 .stream_id = std::nullopt,
                 .timeout_task_id = event_loop::schedule(this->vpn->parameters.ev_loop,
@@ -458,7 +464,10 @@ void Http3Upstream::do_health_check() {
                                 this,
                                 [](void *arg, TaskId) {
                                     auto *self = (Http3Upstream *) arg;
-                                    self->close_stream(*self->m_health_check_info->stream_id, H3_REQUEST_CANCELLED);
+                                    if (self->m_health_check_info->stream_id.has_value()) {
+                                        self->close_stream(
+                                                *self->m_health_check_info->stream_id, H3_REQUEST_CANCELLED);
+                                    }
                                     self->m_health_check_info.reset();
                                     VpnError e = {VPN_EC_ERROR, "No HTTP3 session"};
                                     self->handler.func(self->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &e);
@@ -469,6 +478,30 @@ void Http3Upstream::do_health_check() {
         return;
     }
 
+    // Under bulk multi-stream download every inbound packet used to cancel a freshly
+    // opened CONNECT probe (open+RST). That races server H3 write/FIN and kills the
+    // whole session (ERR_FINAL_SIZE / peer 0x6). If we already have recent inbound,
+    // the session is alive — do not open a probe.
+    {
+        using clock = std::chrono::steady_clock;
+        const auto now_ms =
+                duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
+        std::optional<uint64_t> age_ms;
+        if (m_last_inbound_steady_ms.has_value() && now_ms >= *m_last_inbound_steady_ms) {
+            age_ms = uint64_t(now_ms - *m_last_inbound_steady_ms);
+        }
+        const auto max_age_ms =
+                uint64_t(std::max<int64_t>(1, this->vpn->upstream_config.timeout.count()));
+        if (should_skip_h3_health_check_probe(age_ms, max_age_ms)) {
+            log_upstream(this, info,
+                    "Health check: skipped (inbound {}ms ago < timeout {}ms; session busy)",
+                    age_ms.value_or(0), max_age_ms);
+            return;
+        }
+    }
+
+    log_upstream(this, info, "Health check: starting CONNECT probe (timeout={}ms)",
+            this->vpn->upstream_config.health_check_timeout.count());
     auto [stream_id, is_retriable] = this->send_connect_request(&HEALTH_CHECK_HOST, "");
     if (stream_id.has_value()) {
         m_health_check_info = {
@@ -478,6 +511,7 @@ void Http3Upstream::do_health_check() {
                                 this,
                                 [](void *arg, TaskId) {
                                     auto *self = (Http3Upstream *) arg;
+                                    log_upstream(self, warn, "Health check: timed out");
                                     self->close_stream(*self->m_health_check_info->stream_id, H3_REQUEST_CANCELLED);
                                     self->m_health_check_info.reset();
                                     VpnError e = {VPN_EC_ERROR, "Health check has timed out"};
@@ -490,6 +524,7 @@ void Http3Upstream::do_health_check() {
     }
 
     if (is_retriable) {
+        log_upstream(this, info, "Health check: send retriable, will retry");
         HealthCheckInfo &info = m_health_check_info.emplace(HealthCheckInfo{});
         info.retry_task_id = event_loop::schedule(this->vpn->parameters.ev_loop,
                 {
@@ -504,6 +539,7 @@ void Http3Upstream::do_health_check() {
         return;
     }
 
+    log_upstream(this, warn, "Health check: failed to open probe stream");
     m_health_check_info = {
             .stream_id = std::nullopt,
             .timeout_task_id = event_loop::schedule(this->vpn->parameters.ev_loop,
@@ -511,7 +547,6 @@ void Http3Upstream::do_health_check() {
                             this,
                             [](void *arg, TaskId) {
                                 auto *self = (Http3Upstream *) arg;
-                                self->close_stream(*self->m_health_check_info->stream_id, H3_REQUEST_CANCELLED);
                                 self->m_health_check_info.reset();
                                 VpnError e = {VPN_EC_ERROR, "Failed to send health check request"};
                                 self->handler.func(self->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &e);
@@ -522,6 +557,11 @@ void Http3Upstream::do_health_check() {
 }
 
 void Http3Upstream::cancel_health_check() {
+    // Must RST the probe stream — reset() alone orphaned CONNECT streams every 30s
+    // under load (cancel on every inbound UDP datagram).
+    if (m_health_check_info.has_value() && m_health_check_info->stream_id.has_value()) {
+        close_stream(*m_health_check_info->stream_id, H3_REQUEST_CANCELLED);
+    }
     m_health_check_info.reset();
 }
 
@@ -566,37 +606,41 @@ void Http3Upstream::socket_handler(void *arg, UdpSocketEvent what, void *data) {
         http::QuicNetworkPath path = make_network_path(local, peer);
 
         upstream->m_in_handler = true;
-        bool data_received = false;
-        std::string input_error;
-        for (size_t i = 0; i < READ_BUDGET; ++i) {
+        for (size_t i = 0; i < READ_BUDGET && !upstream->m_closed; ++i) {
             ssize_t r = udp_socket_recv(upstream->m_socket.get(), buf, sizeof(buf));
             if (r <= 0) {
                 if (int err = evutil_socket_geterror(udp_socket_get_fd(upstream->m_socket.get()));
                         err != 0 && !AG_ERR_IS_EAGAIN(err)) {
-                    log_upstream(upstream, dbg, "Read error: {} ({})", evutil_socket_error_to_string(err), err);
+                    log_upstream(upstream, warn, "QUIC UDP read error: {} ({})",
+                            evutil_socket_error_to_string(err), err);
+                    // Hard socket error: session is unusable; recover immediately.
+                    upstream->m_closed = true;
+                    upstream->m_pending_session_error = VpnError{VPN_EC_ERROR, "QUIC UDP read failure"};
                 }
                 break;
             }
             log_upstream(upstream, trace, "Read {} bytes from endpoint", r);
-            data_received = true;
+            {
+                using clock = std::chrono::steady_clock;
+                upstream->m_last_inbound_steady_ms =
+                        duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
+            }
+            // Inbound proves session alive: drop any idle HC probe without leaving it open.
+            upstream->cancel_health_check();
             if (auto err = upstream->m_h3_client->input(path, {buf, (size_t) r}); err != nullptr) {
-                input_error = err->str();
-                log_upstream(upstream, dbg, "input() error: {}", input_error);
+                // e.g. ERR_FINAL_SIZE / ERR_CLOSING under load: connection is dead.
+                // Must NOT leave H3US_ESTABLISHED until health-check times out (~7–30s blackhole).
+                log_upstream(upstream, warn, "QUIC input() error (fatal for session): {}", err->str());
+                upstream->m_closed = true;
+                upstream->m_pending_session_error =
+                        VpnError{VPN_EC_ERROR, "QUIC protocol error (input failed)"};
                 break;
             }
         }
         upstream->m_in_handler = false;
 
-        // The health check response arrives from inside input(), so cancel only after the loop.
-        if (data_received) {
-            upstream->cancel_health_check();
-        }
-
         if (upstream->m_closed) {
             upstream->close_session_inner(std::exchange(upstream->m_pending_session_error, std::nullopt));
-        } else if (!input_error.empty()) {
-            // `input()` only reports the error, so nothing else tears down the dead QUIC connection.
-            upstream->close_session_inner(VpnError{VPN_EC_ERROR, input_error.c_str()});
         } else if (upstream->m_h3_client) {
             upstream->m_h3_client->flush();
             // Schedule post-receive work (retry_connect_requests, poll_connections)
@@ -619,7 +663,8 @@ void Http3Upstream::socket_handler(void *arg, UdpSocketEvent what, void *data) {
 
     case UDP_SOCKET_EVENT_TIMEOUT:
         if (!upstream->m_h3_client || upstream->m_state != H3US_ESTABLISHED) {
-            log_upstream(upstream, dbg, "UDP socket timed out, closing session");
+            log_upstream(upstream, info, "UDP/QUIC timer while not established (client={} state={}) — closing session",
+                    upstream->m_h3_client ? "yes" : "null", magic_enum::enum_name(upstream->m_state));
             upstream->close_session_inner();
         } else {
             // ACK-eliciting on idle: let ngtcp2 handle it
@@ -766,8 +811,12 @@ void Http3Upstream::on_stream_closed(void *arg, uint64_t stream_id, int error_co
         assert(self->vpn->upstream_config.timeout >= self->vpn->upstream_config.health_check_timeout);
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         if (self->m_health_check_info->error.code == VPN_EC_NOERROR) {
+            log_upstream(self, info, "Health check: OK (stream closed cleanly)");
             stream_close_code = H3_NO_ERROR;
         } else {
+            log_upstream(self, warn, "Health check: failed {} ({})",
+                    safe_to_string_view(self->m_health_check_info->error.text),
+                    self->m_health_check_info->error.code);
             // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
             self->handler.func(self->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &self->m_health_check_info->error);
         }
@@ -818,18 +867,23 @@ void Http3Upstream::on_output(void *arg, const http::QuicNetworkPath &, Uint8Vie
     }
 
     if (VpnError err = udp_socket_write(self->m_socket.get(), chunk.data(), chunk.size()); err.code != 0) {
-        log_upstream(self, dbg, "Failed to send QUIC packet: {} ({})", safe_to_string_view(err.text), err.code);
-        if (!AG_ERR_IS_EAGAIN(err.code) && err.code != AG_ENOBUFS && !self->m_flush_error_task_id.has_value()) {
-            self->m_flush_error_task_id = event_loop::submit(self->vpn->parameters.ev_loop,
-                    {
-                            self,
-                            [](void *a, TaskId) {
-                                auto *s = (Http3Upstream *) a;
-                                s->m_flush_error_task_id.release();
-                                ServerError event = {NON_ID, {VPN_EC_ERROR, "UDP socket failure"}};
-                                s->handler.func(s->handler.arg, SERVER_EVENT_ERROR, &event);
-                            },
-                    });
+        if (!AG_ERR_IS_EAGAIN(err.code) && err.code != AG_ENOBUFS) {
+            log_upstream(self, warn, "Failed to send QUIC packet: {} ({})", safe_to_string_view(err.text), err.code);
+            if (!self->m_flush_error_task_id.has_value()) {
+                self->m_flush_error_task_id = event_loop::submit(self->vpn->parameters.ev_loop,
+                        {
+                                self,
+                                [](void *a, TaskId) {
+                                    auto *s = (Http3Upstream *) a;
+                                    s->m_flush_error_task_id.release();
+                                    log_upstream(s, warn, "UDP socket failure — closing HTTP/3 session");
+                                    ServerError event = {NON_ID, {VPN_EC_ERROR, "UDP socket failure"}};
+                                    s->handler.func(s->handler.arg, SERVER_EVENT_ERROR, &event);
+                                },
+                        });
+            }
+        } else {
+            log_upstream(self, dbg, "Failed to send QUIC packet: {} ({})", safe_to_string_view(err.text), err.code);
         }
     }
 }
@@ -969,12 +1023,21 @@ void Http3Upstream::close_session_inner(std::optional<VpnError> error) {
     if (m_in_handler) {
         m_closed = true;
         m_pending_session_error = error;
+        log_upstream(this, info, "Deferring HTTP/3 session close (in packet handler): {}",
+                error.has_value() ? safe_to_string_view(error->text) : "graceful");
         return;
     }
 
     if (m_cert_verify_failed) {
         log_upstream(this, warn, "TLS certificate verification failed");
         error = {VPN_EC_CERTIFICATE_VERIFICATION_FAILED, "TLS certificate verification failed"};
+    }
+
+    if (error.has_value()) {
+        log_upstream(this, info, "HTTP/3 session ending with error: {} ({})", safe_to_string_view(error->text),
+                error->code);
+    } else {
+        log_upstream(this, info, "HTTP/3 session ending gracefully (peer idle/close or local teardown)");
     }
 
     close_session();
