@@ -797,15 +797,18 @@ void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
     }
 
     if (!chunk.empty()) {
-        // Buffer the remainder; consume_stream will be called as data is drained.
-        // Bound the hold so multi-stream bulk cannot pin hundreds of MB in RSS.
+        // Own the bytes in the app unread buffer, then consume immediately so the
+        // QUIC/H3 stack does not also retain them (double-hold was a sticky RSS leak
+        // under backpressure: stack buffer + MemoryBuffer copy until process restart).
+        const size_t buffered = chunk.size();
         if (!self->push_unread_data(conn_id, conn, chunk)) {
             log_stream(self, stream_id, warn,
                     "Unread buffer full (cap={}B) — closing connection R:{}", H3_MAX_UNREAD_PER_CONN, conn_id);
             self->close_tcp_connection(conn_id, false);
-            self->m_h3_client->consume_stream(stream_id, chunk.size());
+            self->m_h3_client->consume_stream(stream_id, buffered);
             return;
         }
+        self->m_h3_client->consume_stream(stream_id, buffered);
         return;
     }
 }
@@ -1187,10 +1190,7 @@ int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) 
         int r = this->raise_read_event(conn_id, res.data);
         if (r > 0) {
             pending->drain(r);
-            // Tell server it can now send r more bytes on this stream
-            if (m_h3_client) {
-                m_h3_client->consume_stream(conn->stream_id, r);
-            }
+            // QUIC already consumed when we buffered (see on_body); no second consume.
         } else if (r < 0) {
             return r;
         } else {
@@ -1199,7 +1199,7 @@ int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) 
         }
     }
 
-    // Release empty buffer so long-lived sessions do not keep peak heap after bulk.
+    // Release empty buffer so long-lived sessions reclaim app heap after bulk.
     if (pending->size() == 0) {
         conn->unread_data.reset();
     }
