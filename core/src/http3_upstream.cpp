@@ -25,10 +25,6 @@
 using namespace std::chrono;
 using namespace ag;
 
-// Cap app-side reassembly buffer per CONNECT stream. Beyond this we close the
-// flow (backpressure) instead of holding multi-MB until process restart.
-static constexpr size_t H3_MAX_UNREAD_PER_CONN = 384ul * 1024;
-
 enum Http3Upstream::Http3ErrorCode : uint64_t {
     H3_NO_ERROR = NGHTTP3_H3_NO_ERROR,
     H3_REQUEST_CANCELLED = NGHTTP3_H3_REQUEST_CANCELLED,
@@ -1161,7 +1157,7 @@ bool Http3Upstream::push_unread_data(uint64_t conn_id, TcpConnection *conn, U8Vi
     }
 
     const size_t have = conn->unread_data->size();
-    if (have >= H3_MAX_UNREAD_PER_CONN || data.size() > (H3_MAX_UNREAD_PER_CONN - have)) {
+    if (h3_unread_would_exceed_cap(have, data.size(), H3_MAX_UNREAD_PER_CONN)) {
         log_conn(this, conn_id, dbg, "Unread buffer full have={} +{} cap={}", have, data.size(),
                 H3_MAX_UNREAD_PER_CONN);
         return false;

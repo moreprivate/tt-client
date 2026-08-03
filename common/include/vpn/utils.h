@@ -69,6 +69,13 @@ typedef AG_ARRAY_OF(const char) VpnStr;
 static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 12ul * 1024 * 1024;
 static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 256ul * 1024;
 static constexpr uint64_t QUIC_MAX_STREAMS_NUM = 4ul * 1024;
+// Per-CONNECT app unread reassembly cap (http3_upstream); fail closed when exceeded.
+static constexpr size_t H3_MAX_UNREAD_PER_CONN = 384ul * 1024;
+
+/** True if pushing `add` bytes onto an unread buffer of size `have` would exceed `cap`. */
+static inline bool h3_unread_would_exceed_cap(size_t have, size_t add, size_t cap) {
+    return have >= cap || add > (cap - have);
+}
 static constexpr uint8_t QUIC_H3_ALPN_PROTOS[] = {2, 'h', '3'};
 
 // TCP defaults
