@@ -255,11 +255,16 @@ Error<TrustTunnelClient::ConnectResultError> TrustTunnelClient::connect_to_serve
             continue;
         }
         for (const auto &addr : resolved) {
+            // preferred_protocol defaults to VPN_UP_HTTP2 (enum 0). When
+            // upstream_protocol is "auto", main_protocol is AUTO and ping uses
+            // preferred_protocol for dual H2/H3 probe — so leave preferred as
+            // AUTO here or auto silently stays HTTP/2-only (no QUIC race).
             auto &last_el = endpoints.emplace_back(VpnEndpoint{
                     .address = addr,
                     .name = hostnames[target.host_index].c_str(),
                     .remote_id = remote_ids[target.host_index].c_str(),
                     .has_ipv6 = m_config.location.has_ipv6,
+                    .preferred_protocol = m_config.location.upstream_protocol,
             });
             if (!m_config.location.client_random.empty()) {
                 copy_to_c_buffer(last_el.tls_client_random, m_config.location.client_random);
@@ -286,6 +291,8 @@ Error<TrustTunnelClient::ConnectResultError> TrustTunnelClient::connect_to_serve
                                             .endpoints = {endpoints.data(), uint32_t(endpoints.size())},
                                             .relays = {relays.data(), uint32_t(relays.size())},
                                     },
+                            .timeout_ms = m_config.location.timeout_ms,
+                            .health_check_timeout_ms = m_config.location.health_check_timeout_ms,
                             .username = m_config.location.username.c_str(),
                             .password = m_config.location.password.c_str(),
                             .recovery =

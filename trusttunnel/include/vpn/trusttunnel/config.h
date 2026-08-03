@@ -27,6 +27,10 @@ struct TrustTunnelConfig {
         ag::UniquePtr<X509_STORE, &X509_STORE_free> ca_store;
         ag::VpnUpstreamProtocol upstream_protocol = ag::VPN_UP_HTTP2;
         uint32_t http2_connections_num = 0;
+        /** 0 = library default (VPN_DEFAULT_ENDPOINT_UPSTREAM_TIMEOUT_MS). */
+        uint32_t timeout_ms = 0;
+        /** 0 = library default (VPN_DEFAULT_HEALTH_CHECK_TIMEOUT_MS). Raise under bufferbloat. */
+        uint32_t health_check_timeout_ms = 0;
         std::string client_random;
         std::string client_random_mask;
         std::optional<std::vector<std::string>> dns_upstreams;

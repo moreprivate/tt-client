@@ -29,7 +29,9 @@ static constexpr uint32_t MAX_HTTP2_CONNECTIONS_NUM = 8;
 static const Logger g_logger("TRUSTTUNNEL_CLIENT"); // NOLINT(readability-identifier-naming)
 
 static const std::unordered_map<std::string_view, VpnUpstreamProtocol> UPSTREAM_PROTO_MAP = {
+        {"auto", VPN_UP_AUTO},
         {"http2", VPN_UP_HTTP2},
+        {"http3", VPN_UP_HTTP3},
 };
 
 static const std::unordered_map<std::string_view, VpnMode> VPN_MODE_MAP = {
@@ -130,7 +132,7 @@ static std::optional<TrustTunnelConfig::Location> build_endpoint(const toml::tab
             upstream_protocol && UPSTREAM_PROTO_MAP.contains(*upstream_protocol)) {
         location.upstream_protocol = UPSTREAM_PROTO_MAP.at(*upstream_protocol);
     } else {
-        errlog(g_logger, "Only upstream_protocol = \"http2\" is supported; got {}",
+        errlog(g_logger, "upstream_protocol must be \"auto\", \"http2\", or \"http3\"; got {}",
                 streamable_to_string(config["upstream_protocol"]));
         return std::nullopt;
     }
@@ -144,6 +146,23 @@ static std::optional<TrustTunnelConfig::Location> build_endpoint(const toml::tab
             return std::nullopt;
         }
         location.http2_connections_num = static_cast<uint32_t>(*connections_num);
+    }
+
+    if (config.contains("timeout_ms")) {
+        auto v = config["timeout_ms"].value<int64_t>();
+        if (!v || *v < 0 || *v > 600000) {
+            errlog(g_logger, "timeout_ms must be an integer between 0 and 600000");
+            return std::nullopt;
+        }
+        location.timeout_ms = static_cast<uint32_t>(*v);
+    }
+    if (config.contains("health_check_timeout_ms")) {
+        auto v = config["health_check_timeout_ms"].value<int64_t>();
+        if (!v || *v < 0 || *v > 600000) {
+            errlog(g_logger, "health_check_timeout_ms must be an integer between 0 and 600000");
+            return std::nullopt;
+        }
+        location.health_check_timeout_ms = static_cast<uint32_t>(*v);
     }
 
     // Parse client random (format: "prefix[/mask]")
