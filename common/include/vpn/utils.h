@@ -62,20 +62,8 @@ struct TcpFlowCtrlInfo {
 typedef AG_ARRAY_OF(const char) VpnStr;
 #define VPNSTR_INIT(c_string) {c_string, (c_string) ? uint32_t(strlen(c_string)) : 0}
 
-// QUIC defaults
-// Connection window was 100 MiB: ngtcp2 can grow receive buffers up to max_window, which
-// on OpenWrt (~256 MiB RAM) left VmRSS ~120 MiB after multi download until process restart.
-// 12 MiB still supports ~25–100+ Mbps multi-stream; stream window bounds per-flow hold.
-static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 12ul * 1024 * 1024;
-static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 256ul * 1024;
-static constexpr uint64_t QUIC_MAX_STREAMS_NUM = 4ul * 1024;
-// Per-CONNECT app unread reassembly cap (http3_upstream); fail closed when exceeded.
-static constexpr size_t H3_MAX_UNREAD_PER_CONN = 384ul * 1024;
-
-/** True if pushing `add` bytes onto an unread buffer of size `have` would exceed `cap`. */
-static inline bool h3_unread_would_exceed_cap(size_t have, size_t add, size_t cap) {
-    return have >= cap || add > (cap - have);
-}
+// QUIC + long-lived H3 stability bounds (see h3_long_lived_bounds.h).
+#include "vpn/h3_long_lived_bounds.h"
 static constexpr uint8_t QUIC_H3_ALPN_PROTOS[] = {2, 'h', '3'};
 
 // TCP defaults
