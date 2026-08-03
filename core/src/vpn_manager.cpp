@@ -109,11 +109,31 @@ vpn_client::EndpointConnectionConfig Vpn::make_client_upstream_config() const {
     if (endpoint->has_ipv6) {
         ip_availability.set(IPV6);
     }
-    VpnUpstreamProtocolConfig main_protocol{
-            .type = this->client.quic_connector ? VPN_UP_HTTP3 : VPN_UP_HTTP2,
-    };
-    if (main_protocol.type == VPN_UP_HTTP2) {
+    // Prefer configured protocol. H3 does not require a ping QUIC handoff — Http3Upstream
+    // can open a fresh QUIC session; handoff is only a fast path when present.
+    // (Old logic: no handoff ⇒ always H2. Recovery after server restart / session death
+    // then stuck on H2 despite upstream_protocol=http3 until a full client restart.)
+    VpnUpstreamProtocolConfig main_protocol{};
+    VpnUpstreamProtocol chosen = this->upstream_config->main_protocol;
+    if (chosen == VPN_UP_AUTO) {
+        chosen = this->client.quic_connector ? VPN_UP_HTTP3 : VPN_UP_HTTP2;
+    }
+    if (chosen == VPN_UP_HTTP3) {
+        main_protocol.type = VPN_UP_HTTP3;
+        if (this->client.quic_connector) {
+            log_vpn(this, info, "Upstream transport: HTTP/3 (QUIC handoff)");
+        } else {
+            log_vpn(this, info, "Upstream transport: HTTP/3 (fresh QUIC, no handoff)");
+        }
+    } else {
+        main_protocol.type = VPN_UP_HTTP2;
         main_protocol.http2.connections_num = this->upstream_config->http2_connections_num;
+        if (this->upstream_config->main_protocol == VPN_UP_AUTO) {
+            log_vpn(this, info, "AUTO location ping selected HTTP/2 (fresh TLS; probe not reused)");
+        } else {
+            log_vpn(this, info, "Upstream transport: HTTP/2 ({} parallel session(s))",
+                    main_protocol.http2.connections_num ? main_protocol.http2.connections_num : 1u);
+        }
     }
     return {
             .main_protocol = main_protocol,
