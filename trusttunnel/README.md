@@ -123,10 +123,10 @@ The configuration file uses TOML format. Below are all available settings.
 | `client_random` | string | `""` | TLS client random prefix and mask (hex, format: `prefix[/mask]`) |
 | `skip_verification` | bool | `false` | Skip endpoint certificate verification (accepts any cert) |
 | `certificate` | string | `null` | Endpoint certificate in PEM format (uses system store if empty) |
-| `upstream_protocol` | string | `"http2"` | Protocol: `auto`, `http2`, or `http3`. `auto` dual-probes H2 and H3 (H2 gets a short head start); H2 wins open a fresh verified TLS session (probe is never reused). Prefer forced `http3` when measuring tunnel HOL vs TCP. |
+| `upstream_protocol` | string | `"http2"` | Protocol: `auto`, `http2`, or `http3` (omit key → default `http2`). `auto` dual-probes H2 and H3 (H2 gets a short head start); H2 wins open a fresh verified TLS session (probe is never reused). Forced `http3` does **not** automatically fall back to H2 on failure (empty fallback). Prefer `http3` when measuring tunnel HOL vs TCP. |
 | `http2_connections_num` | int | `0` | Parallel HTTP/2 sessions: `0` uses the default (8), or set `1` through `8` |
 | `timeout_ms` | int | `0` | Endpoint connect / health cadence base; `0` = library default (30s) |
-| `health_check_timeout_ms` | int | `0` | Fail health check after this many ms → recovery; `0` = 7s. Raise (e.g. 15000) on bufferbloated last-mile to avoid thrash under load |
+| `health_check_timeout_ms` | int | `0` | Fail health check after this many ms → recovery; `0` = 7s. Busy-session HC skip window is `min(this, timeout_ms)`. Raise (e.g. 15000) on bufferbloated last-mile to avoid thrash under load |
 | `anti_dpi` | bool | `false` | Enable anti-DPI (Deep Packet Inspection) measures |
 | `dns_upstreams` | array[string] | `[]` | DNS resolvers for queries routed through VPN. If empty, AdGuard DNS unfiltered is used |
 
