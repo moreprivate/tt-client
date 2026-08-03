@@ -116,9 +116,10 @@ static void postponement_window_timer_cb(evutil_socket_t, short, void *arg);
 
 static void initiate_recovery(Vpn *vpn) {
     if (vpn->recovery.attempts >= vpn->upstream_config->recovery.attempts) {
-        log_vpn(vpn, dbg, "Maximum number of recovery attempts has been made");
+        log_vpn(vpn, warn, "Maximum recovery attempts ({}) exhausted — disconnecting",
+                vpn->upstream_config->recovery.attempts);
         vpn->submit([vpn] {
-            log_vpn(vpn, dbg, "Disconnecting: failed recovery");
+            log_vpn(vpn, warn, "Disconnecting: recovery failed after max attempts");
             vpn->recovery = {};
             vpn->pending_error = {VPN_EC_LOCATION_UNAVAILABLE, "Maximum number of recovery attempts has been made"};
             vpn->fsm.perform_transition(CE_SHUTDOWN, nullptr);
@@ -144,25 +145,34 @@ static void initiate_recovery(Vpn *vpn) {
         time_to_next = vpn->recovery.time.between_attempts - elapsed;
     }
 
-    log_vpn(vpn, dbg, "Time to next recovery: {}", time_to_next);
-
     ++vpn->recovery.attempts;
+    // After first schedule, ensure subsequent gaps use at least 1s * backoff (initial may be 0).
+    if (vpn->recovery.time.between_attempts.count() == 0 && vpn->recovery.attempts == 1) {
+        // Keep time_to_next = 0 for this first attempt; seed next gap after scheduling.
+    }
+    log_vpn(vpn, info, "Schedule recovery attempt {}/{} in {}ms (backoff next window)", vpn->recovery.attempts,
+            vpn->upstream_config->recovery.attempts, time_to_next.count());
     vpn->recovery.task = event_loop::schedule(
             vpn->ev_loop.get(),
             [vpn]() {
-                log_vpn(vpn, dbg, "Recovering session...");
+                log_vpn(vpn, info, "Recovering session (attempt starting)...");
                 vpn->recovery.task.release();
                 vpn->recovery.time.attempt_start_ts = SteadyClock::now();
                 vpn->fsm.perform_transition(vpn_fsm::CE_DO_RECOVERY, nullptr);
             },
             time_to_next);
 
-    vpn->recovery.time.between_attempts = std::chrono::round<Millis>(
-            vpn->recovery.time.between_attempts * vpn->upstream_config->recovery.backoff_rate);
+    // Seed/backoff: if initial was 0, next wait becomes 1000ms then * rate.
+    if (vpn->recovery.time.between_attempts.count() == 0) {
+        vpn->recovery.time.between_attempts = Millis{1000};
+    } else {
+        vpn->recovery.time.between_attempts = std::chrono::round<Millis>(
+                vpn->recovery.time.between_attempts * vpn->upstream_config->recovery.backoff_rate);
+    }
     auto next_attempt_ts = now + time_to_next;
     if (next_attempt_ts - vpn->recovery.time.start_ts
             >= Millis{vpn->upstream_config->recovery.location_update_period_ms}) {
-        log_vpn(vpn, dbg, "Resetting recovery state due to the recovery took too long");
+        log_vpn(vpn, info, "Resetting recovery timing (location re-ping period elapsed)");
         vpn->recovery.time = {};
     }
 
@@ -298,9 +308,12 @@ static void run_ping(void *ctx, void *) {
             .rounds = 1,
             .main_protocol = vpn->upstream_config->main_protocol,
             .anti_dpi = vpn->upstream_config->anti_dpi,
-            // HTTP/2 pings do not verify endpoint certificates, so their TLS connections
-            // must not be handed to the verified endpoint upstream.
-            .handoff = vpn->upstream_config->main_protocol == VPN_UP_HTTP3,
+            // HTTP/2 location probes do not complete endpoint cert verification, so
+            // TCP sockets are never handed off. Only a half-open QUIC connection may
+            // be handed off; cert verify is armed on the upstream before the first
+            // saved server datagram is processed. For AUTO/HTTP2-win, open a fresh
+            // verified TLS/HTTP2 session instead of reusing the probe.
+            .handoff = vpn->upstream_config->main_protocol != VPN_UP_HTTP2,
             .quic_max_idle_timeout_ms = quic_max_idle_timeout,
             .quic_version = 0,
     };
@@ -384,17 +397,17 @@ static void retry_connect(void *ctx, void *) {
 
 static void prepare_for_recovery(void *ctx, void *data) {
     Vpn *vpn = (Vpn *) ctx;
-    log_vpn(vpn, trace, "...");
-
-    vpn->disconnect();
-    initiate_recovery(vpn);
-
     const VpnError *error = (VpnError *) data;
     if (!vpn->pending_error.has_value() && error != nullptr && error->code != VPN_EC_NOERROR) {
         vpn->pending_error = *error;
     }
+    log_vpn(vpn, info, "Entering recovery: reason={} ({}) fsm_state={}",
+            safe_to_string_view(vpn->pending_error.value_or(VpnError{}).text),
+            vpn->pending_error.value_or(VpnError{}).code,
+            magic_enum::enum_name((VpnSessionState) vpn->fsm.get_state()));
 
-    log_vpn(vpn, trace, "Done");
+    vpn->disconnect();
+    initiate_recovery(vpn);
 }
 
 void prepare_for_recovery_nc(void *ctx, void *) {
@@ -476,14 +489,15 @@ static void raise_state(void *ctx, void *) {
     VpnStateChangedEvent event = {vpn->upstream_config->location.id, state};
     std::string kex_group_name;
 
-    log_vpn(vpn, info, "{}", magic_enum::enum_name((VpnSessionState) vpn->fsm.get_state()));
-
     switch (state) {
     case VPN_SS_WAITING_RECOVERY:
         event.waiting_recovery_info = {
                 .error = std::exchange(vpn->pending_error, std::nullopt).value_or(VpnError{}),
                 .time_to_next_ms = uint32_t(vpn->recovery.time.to_next.count()),
         };
+        log_vpn(vpn, info, "{}: reason={} ({}) next_attempt_ms={}", magic_enum::enum_name(state),
+                safe_to_string_view(event.waiting_recovery_info.error.text),
+                event.waiting_recovery_info.error.code, event.waiting_recovery_info.time_to_next_ms);
         break;
     case VPN_SS_CONNECTED: {
         vpn->connected_once = true;
@@ -497,6 +511,8 @@ static void raise_state(void *ctx, void *) {
                 .protocol = vpn->client.endpoint_upstream->get_protocol(),
                 .kex_group = kex_group_name.c_str(),
         };
+        log_vpn(vpn, info, "{}: protocol={} kex={}", magic_enum::enum_name(state),
+                magic_enum::enum_name(event.connected_info.protocol), kex_group_name);
         break;
     }
     case VPN_SS_DISCONNECTED:
@@ -506,6 +522,12 @@ static void raise_state(void *ctx, void *) {
         [[fallthrough]];
     case VPN_SS_WAITING_FOR_NETWORK:
         event.error = std::exchange(vpn->pending_error, std::nullopt).value_or(VpnError{});
+        if (event.error.code != VPN_EC_NOERROR) {
+            log_vpn(vpn, info, "{}: error={} ({})", magic_enum::enum_name(state),
+                    safe_to_string_view(event.error.text), event.error.code);
+        } else {
+            log_vpn(vpn, info, "{}", magic_enum::enum_name(state));
+        }
         break;
     }
 
