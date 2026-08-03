@@ -545,7 +545,16 @@ void Http2Upstream::close_session_inner(std::optional<VpnError> error) {
     if (m_in_handler > 0) {
         m_closed = true;
         m_pending_session_error = error;
+        log_upstream(this, info, "Deferring HTTP/2 session close: {}",
+                error.has_value() ? safe_to_string_view(error->text) : "graceful");
         return;
+    }
+
+    if (error.has_value()) {
+        log_upstream(this, info, "HTTP/2 session ending with error: {} ({})", safe_to_string_view(error->text),
+                error->code);
+    } else {
+        log_upstream(this, info, "HTTP/2 session ending gracefully");
     }
 
     close_session();
@@ -559,7 +568,7 @@ void Http2Upstream::close_session_inner(std::optional<VpnError> error) {
 }
 
 void Http2Upstream::close_session() {
-    log_upstream(this, dbg, "...");
+    log_upstream(this, info, "Closing HTTP/2 session");
 
     m_closing = true;
 
@@ -870,8 +879,10 @@ size_t Http2Upstream::connections_num() const {
 void Http2Upstream::do_health_check(bool need_result) {
     m_health_check_info.reset(); // Forget about the current health check.
 
+    log_upstream(this, info, "Health check: starting CONNECT probe (need_result={})", need_result);
     std::optional<uint32_t> stream_id = send_connect_request(NON_ID, &HEALTH_CHECK_HOST, "");
     if (!stream_id.has_value()) {
+        log_upstream(this, warn, "Health check: failed to open probe stream");
         m_health_check_info = HealthCheckInfo{
                 .stream_id = UINT32_MAX,
                 .timeout_task_id = event_loop::schedule(this->vpn->parameters.ev_loop,
@@ -956,6 +967,8 @@ int Http2Upstream::kex_group_nid() const {
 }
 
 void Http2Upstream::report_health_check_error(bool need_result, ag::VpnError error) {
+    log_upstream(this, warn, "Health check result: {} ({}) need_result={}", safe_to_string_view(error.text),
+            error.code, need_result);
     if (need_result) {
         this->handler.func(this->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &error);
     } else {

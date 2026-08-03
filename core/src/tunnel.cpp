@@ -454,7 +454,15 @@ static bool send_buffered_data(const Tunnel *self, uint64_t conn_client_id) {
     size_t server_can_send = upstream->available_to_send(conn->server_id);
     log_conn(self, conn, trace, "Can send to server side: {} bytes, upstream sent zero bytes: {}", server_can_send,
             sent_zero_bytes);
-    listener->turn_read(conn->client_id, server_can_send > 0 && !sent_zero_bytes);
+    bool allow_read = server_can_send > 0 && !sent_zero_bytes;
+    // Log when we *stop* reading from a client flow due to endpoint stall (not every zero-window tick).
+    if (!allow_read && upstream.get() == self->vpn->endpoint_upstream.get() && sent_zero_bytes) {
+        log_conn(self, conn, warn,
+                "Endpoint send failed (0 bytes written); pausing client read (server_can_send={}) — "
+                "data path may be wedged while session still CONNECTED",
+                server_can_send);
+    }
+    listener->turn_read(conn->client_id, allow_read);
     upstream->update_flow_control(conn->server_id, listener->flow_control_info(conn_client_id));
     return true;
 }
