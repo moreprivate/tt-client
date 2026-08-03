@@ -24,6 +24,20 @@ TEST(HealthCheckProbeSkip, SkipsWhenRecentInbound) {
     EXPECT_EQ(health_check_busy_skip_max_age_ms(0, 0), 1u);
 }
 
+// Long-lived OpenWrt stability: shipped QUIC windows + unread-cap gate (not 100 MiB hold).
+TEST(QuicLongLivedBounds, WindowsAndUnreadCap) {
+    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 12ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 256ull * 1024);
+    EXPECT_LT(QUIC_CONNECTION_WINDOW_SIZE, 100ull * 1024 * 1024);
+    EXPECT_EQ(H3_MAX_UNREAD_PER_CONN, 384ull * 1024);
+    // Real shipped gate used by Http3Upstream::push_unread_data
+    EXPECT_FALSE(h3_unread_would_exceed_cap(0, 1, H3_MAX_UNREAD_PER_CONN));
+    EXPECT_FALSE(h3_unread_would_exceed_cap(H3_MAX_UNREAD_PER_CONN - 1, 1, H3_MAX_UNREAD_PER_CONN));
+    EXPECT_TRUE(h3_unread_would_exceed_cap(H3_MAX_UNREAD_PER_CONN, 1, H3_MAX_UNREAD_PER_CONN));
+    EXPECT_TRUE(h3_unread_would_exceed_cap(H3_MAX_UNREAD_PER_CONN - 1, 2, H3_MAX_UNREAD_PER_CONN));
+    EXPECT_TRUE(h3_unread_would_exceed_cap(0, H3_MAX_UNREAD_PER_CONN + 1, H3_MAX_UNREAD_PER_CONN));
+}
+
 class TunnelAddressTest : public testing::TestWithParam<std::pair<TunnelAddress, TunnelAddress>> {
 protected:
 };
