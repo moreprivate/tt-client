@@ -128,6 +128,9 @@ void Http2Upstream::handle_response(const HttpHeadersEvent *http_event) {
 
 int Http2Upstream::read_out_pending_data(uint64_t id, TcpConnection *conn) {
     DataBuffer *pending = conn->unread_data.get();
+    if (pending == nullptr) {
+        return 0;
+    }
 
     while (conn->flags.test(TcpConnection::TCF_READ_ENABLED) && pending->size() > 0) {
         BufferPeekResult res = pending->peek();
@@ -140,7 +143,13 @@ int Http2Upstream::read_out_pending_data(uint64_t id, TcpConnection *conn) {
             pending->drain(r);
         } else if (r < 0) {
             return r;
+        } else {
+            break;
         }
+    }
+
+    if (pending->size() == 0) {
+        conn->unread_data.reset();
     }
 
     return 0;

@@ -356,10 +356,12 @@ uint64_t ag::DnsHandlerClientListenerBase::send_as_listener(
         } else if (it->second.udp_pending.size() < MAX_UDP_QUEUE_SIZE) {
             it->second.udp_pending.emplace_back(message.begin(), message.end());
         } else {
-            // Symptom of endpoint backpressure or half-dead tunnel: DNS cannot enter the VPN path.
-            log_upstream(this, warn,
-                    "DNS drop: read disabled + queue full for UDP {} ({}) -> {} "
-                    "(endpoint likely wedged; watch for HTTP/3 session close / health check)",
+            // Keep freshest queries under backpressure: drop oldest, enqueue newest.
+            // Avoid permanent "wedged" DNS after bulk download without session death.
+            it->second.udp_pending.pop_front();
+            it->second.udp_pending.emplace_back(message.begin(), message.end());
+            log_upstream(this, dbg,
+                    "DNS queue full (read disabled) for UDP {} ({}) -> {} — dropped oldest, kept newest",
                     info.addrs->src, info.app_name, tunnel_addr_to_str(&info.addrs->dst));
         }
     } else {
