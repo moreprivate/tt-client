@@ -47,13 +47,17 @@ void MemoryBuffer::drain(size_t length) {
 
         std::vector<uint8_t> &front = m_chunks.front();
         size_t to_remove = std::min(front.size(), length);
+        if (to_remove == front.size()) {
+            // Drop whole chunk (frees capacity); avoids sticky vector growth after bulk.
+            m_chunks.pop();
+            length -= to_remove;
+            continue;
+        }
         // NOLINTNEXTLINE(bugprone-narrowing-conversions,cppcoreguidelines-narrowing-conversions)
         front.erase(front.begin(), front.begin() + to_remove);
-
+        // Reclaim unused capacity on the residual front chunk after a partial drain.
+        front.shrink_to_fit();
         length -= to_remove;
-        if (front.empty()) {
-            m_chunks.pop();
-        }
     }
 }
 
