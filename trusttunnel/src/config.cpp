@@ -128,14 +128,17 @@ static std::optional<TrustTunnelConfig::Location> build_endpoint(const toml::tab
         location.ca_store = load_certificate(*x);
     }
 
-    if (auto upstream_protocol = config["upstream_protocol"].value<std::string_view>();
-            upstream_protocol && UPSTREAM_PROTO_MAP.contains(*upstream_protocol)) {
-        location.upstream_protocol = UPSTREAM_PROTO_MAP.at(*upstream_protocol);
-    } else {
-        errlog(g_logger, "upstream_protocol must be \"auto\", \"http2\", or \"http3\"; got {}",
-                streamable_to_string(config["upstream_protocol"]));
-        return std::nullopt;
+    if (config.contains("upstream_protocol")) {
+        auto upstream_protocol = config["upstream_protocol"].value<std::string_view>();
+        if (upstream_protocol && UPSTREAM_PROTO_MAP.contains(*upstream_protocol)) {
+            location.upstream_protocol = UPSTREAM_PROTO_MAP.at(*upstream_protocol);
+        } else {
+            errlog(g_logger, "upstream_protocol must be \"auto\", \"http2\", or \"http3\"; got {}",
+                    streamable_to_string(config["upstream_protocol"]));
+            return std::nullopt;
+        }
     }
+    // Missing key: keep default VPN_UP_HTTP2 (struct default).
 
     if (config.contains("http2_connections_num")) {
         auto connections_num = config["http2_connections_num"].value<int64_t>();
