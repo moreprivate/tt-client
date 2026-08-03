@@ -6,6 +6,7 @@
 
 #include "common/file.h"
 #include "common/utils.h"
+#include "vpn/h3_long_lived_bounds.h"
 #include "vpn/internal/utils.h"
 #include "vpn/utils.h"
 
