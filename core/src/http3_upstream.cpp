@@ -450,8 +450,8 @@ void Http3Upstream::update_flow_control(uint64_t id, TcpFlowCtrlInfo info) {
 }
 
 void Http3Upstream::do_health_check() {
-    // Drop any previous probe cleanly (RST), then start a new one — unless busy.
-    cancel_health_check();
+    // Drop any previous probe (hard cancel) before starting a new one — unless busy.
+    cancel_health_check_impl(/*hard=*/true);
 
     // FIXME: AG-8909
     if (!m_h3_client || m_state != H3US_ESTABLISHED) {
@@ -478,10 +478,8 @@ void Http3Upstream::do_health_check() {
         return;
     }
 
-    // Under bulk multi-stream download every inbound packet used to cancel a freshly
-    // opened CONNECT probe (open+RST). That races server H3 write/FIN and kills the
-    // whole session (ERR_FINAL_SIZE / peer 0x6). If we already have recent inbound,
-    // the session is alive — do not open a probe.
+    // Under bulk multi-stream download, opening CONNECT then cancelling on first inbound
+    // races server H3 write/FIN. If inbound is fresher than the HC budget, session is alive.
     {
         using clock = std::chrono::steady_clock;
         const auto now_ms =
@@ -490,11 +488,12 @@ void Http3Upstream::do_health_check() {
         if (m_last_inbound_steady_ms.has_value() && now_ms >= *m_last_inbound_steady_ms) {
             age_ms = uint64_t(now_ms - *m_last_inbound_steady_ms);
         }
-        const auto max_age_ms =
-                uint64_t(std::max<int64_t>(1, this->vpn->upstream_config.timeout.count()));
-        if (should_skip_h3_health_check_probe(age_ms, max_age_ms)) {
-            log_upstream(this, info,
-                    "Health check: skipped (inbound {}ms ago < timeout {}ms; session busy)",
+        const auto max_age_ms = health_check_busy_skip_max_age_ms(
+                this->vpn->upstream_config.health_check_timeout.count(),
+                this->vpn->upstream_config.timeout.count());
+        if (should_skip_health_check_probe(age_ms, max_age_ms)) {
+            log_upstream(this, dbg,
+                    "Health check: skipped (inbound {}ms ago < busy window {}ms)",
                     age_ms.value_or(0), max_age_ms);
             return;
         }
@@ -557,10 +556,15 @@ void Http3Upstream::do_health_check() {
 }
 
 void Http3Upstream::cancel_health_check() {
-    // Must RST the probe stream — reset() alone orphaned CONNECT streams every 30s
-    // under load (cancel on every inbound UDP datagram).
+    // Default: soft cancel (traffic = healthy). Hard cancel used when starting a new probe.
+    cancel_health_check_impl(/*hard=*/false);
+}
+
+void Http3Upstream::cancel_health_check_impl(bool hard) {
     if (m_health_check_info.has_value() && m_health_check_info->stream_id.has_value()) {
-        close_stream(*m_health_check_info->stream_id, H3_REQUEST_CANCELLED);
+        // Soft: H3_NO_ERROR (peer traffic already proved liveness; avoid CANCELled storm).
+        // Hard: REQUEST_CANCELLED when replacing/aborting a probe deliberately.
+        close_stream(*m_health_check_info->stream_id, hard ? H3_REQUEST_CANCELLED : H3_NO_ERROR);
     }
     m_health_check_info.reset();
 }
@@ -625,8 +629,10 @@ void Http3Upstream::socket_handler(void *arg, UdpSocketEvent what, void *data) {
                 upstream->m_last_inbound_steady_ms =
                         duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
             }
-            // Inbound proves session alive: drop any idle HC probe without leaving it open.
-            upstream->cancel_health_check();
+            // Inbound proves session alive: soft-cancel active probe only (no hard CANCEL storm).
+            if (upstream->m_health_check_info.has_value()) {
+                upstream->cancel_health_check();
+            }
             if (auto err = upstream->m_h3_client->input(path, {buf, (size_t) r}); err != nullptr) {
                 // e.g. ERR_FINAL_SIZE / ERR_CLOSING under load: connection is dead.
                 // Must NOT leave H3US_ESTABLISHED until health-check times out (~7–30s blackhole).

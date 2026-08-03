@@ -133,6 +133,8 @@ private:
     void update_flow_control(uint64_t id, TcpFlowCtrlInfo info) override;
     void do_health_check() override;
     void cancel_health_check() override;
+    /** hard=true: REQUEST_CANCELLED when starting a new probe; hard=false: NO_ERROR on traffic. */
+    void cancel_health_check_impl(bool hard);
     [[nodiscard]] VpnConnectionStats get_connection_stats() const override;
     void on_icmp_request(IcmpEchoRequestEvent &event) override;
     void handle_sleep() override;

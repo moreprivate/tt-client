@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -123,19 +125,36 @@ inline bool operator!=(const TunnelAddressPair &lh, const TunnelAddressPair &rh)
 static const TunnelAddress HEALTH_CHECK_HOST(NamePort{"_check", 0});
 
 /**
- * Skip opening an H3 health-check CONNECT while the session already has recent
- * inbound data-plane traffic. Opening then RST-ing a probe under bulk multi-stream
- * load races server H3 body/write-FIN and can kill the whole session (FINAL_SIZE).
+ * Skip opening a health-check CONNECT while the session already has recent
+ * inbound data-plane traffic. Opening then cancelling a probe under bulk
+ * multi-stream load races the endpoint write path (H3 FINAL_SIZE).
  *
- * @param last_inbound_age_ms  age of last inbound UDP, or nullopt if never
+ * Prefer max_age_ms = health_check_timeout (not full endpoint timeout) so a
+ * quiet/half-dead path still gets a real probe within the HC budget.
+ *
+ * @param last_inbound_age_ms  age of last inbound, or nullopt if never
  * @param max_age_ms           treat session healthy if age < max_age_ms
  */
-inline bool should_skip_h3_health_check_probe(
+inline bool should_skip_health_check_probe(
         std::optional<uint64_t> last_inbound_age_ms, uint64_t max_age_ms) {
     if (!last_inbound_age_ms.has_value()) {
         return false;
     }
     return *last_inbound_age_ms < max_age_ms;
+}
+
+/** @deprecated use should_skip_health_check_probe */
+inline bool should_skip_h3_health_check_probe(
+        std::optional<uint64_t> last_inbound_age_ms, uint64_t max_age_ms) {
+    return should_skip_health_check_probe(last_inbound_age_ms, max_age_ms);
+}
+
+/** Skip window: min(health_check_timeout, endpoint timeout), at least 1ms. */
+inline uint64_t health_check_busy_skip_max_age_ms(
+        int64_t health_check_timeout_ms, int64_t endpoint_timeout_ms) {
+    const int64_t hc = std::max<int64_t>(1, health_check_timeout_ms);
+    const int64_t ep = std::max<int64_t>(1, endpoint_timeout_ms);
+    return uint64_t(std::min(hc, ep));
 }
 
 std::string tunnel_addr_to_str(const TunnelAddress *addr);
