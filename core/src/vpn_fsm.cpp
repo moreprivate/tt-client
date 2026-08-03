@@ -145,10 +145,21 @@ static void initiate_recovery(Vpn *vpn) {
         time_to_next = vpn->recovery.time.between_attempts - elapsed;
     }
 
+    // Anti-thrash: after a recent recovery fire (e.g. path flap + fail-fast QUIC death),
+    // do not start another 0ms reconnect immediately even though between_attempts reset.
+    if (vpn->last_recovery_fire_ts != SteadyClock::time_point{}) {
+        const Millis since_fire =
+                std::max(duration_cast<Millis>(now - vpn->last_recovery_fire_ts), Millis{});
+        const Millis min_gap{VPN_MIN_RECOVERY_FIRE_GAP_MS};
+        if (since_fire < min_gap) {
+            time_to_next = std::max(time_to_next, min_gap - since_fire);
+        }
+    }
+
     ++vpn->recovery.attempts;
     // After first schedule, ensure subsequent gaps use at least 1s * backoff (initial may be 0).
     if (vpn->recovery.time.between_attempts.count() == 0 && vpn->recovery.attempts == 1) {
-        // Keep time_to_next = 0 for this first attempt; seed next gap after scheduling.
+        // Keep time_to_next as computed (0 or min-gap); seed next gap after scheduling.
     }
     log_vpn(vpn, info, "Schedule recovery attempt {}/{} in {}ms (backoff next window)", vpn->recovery.attempts,
             vpn->upstream_config->recovery.attempts, time_to_next.count());
@@ -157,7 +168,8 @@ static void initiate_recovery(Vpn *vpn) {
             [vpn]() {
                 log_vpn(vpn, info, "Recovering session (attempt starting)...");
                 vpn->recovery.task.release();
-                vpn->recovery.time.attempt_start_ts = SteadyClock::now();
+                vpn->last_recovery_fire_ts = SteadyClock::now();
+                vpn->recovery.time.attempt_start_ts = vpn->last_recovery_fire_ts;
                 vpn->fsm.perform_transition(vpn_fsm::CE_DO_RECOVERY, nullptr);
             },
             time_to_next);
