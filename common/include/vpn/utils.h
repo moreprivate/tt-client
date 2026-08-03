@@ -63,8 +63,11 @@ typedef AG_ARRAY_OF(const char) VpnStr;
 #define VPNSTR_INIT(c_string) {c_string, (c_string) ? uint32_t(strlen(c_string)) : 0}
 
 // QUIC defaults
-static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 100ul * 1024 * 1024;
-static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 1ul * 1024 * 1024;
+// Connection window was 100 MiB: ngtcp2 can grow receive buffers up to max_window, which
+// on OpenWrt (~256 MiB RAM) left VmRSS ~120 MiB after multi download until process restart.
+// 12 MiB still supports ~25–100+ Mbps multi-stream; stream window bounds per-flow hold.
+static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 12ul * 1024 * 1024;
+static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 256ul * 1024;
 static constexpr uint64_t QUIC_MAX_STREAMS_NUM = 4ul * 1024;
 static constexpr uint8_t QUIC_H3_ALPN_PROTOS[] = {2, 'h', '3'};
 

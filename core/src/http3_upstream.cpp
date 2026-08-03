@@ -25,6 +25,10 @@
 using namespace std::chrono;
 using namespace ag;
 
+// Cap app-side reassembly buffer per CONNECT stream. Beyond this we close the
+// flow (backpressure) instead of holding multi-MB until process restart.
+static constexpr size_t H3_MAX_UNREAD_PER_CONN = 384ul * 1024;
+
 enum Http3Upstream::Http3ErrorCode : uint64_t {
     H3_NO_ERROR = NGHTTP3_H3_NO_ERROR,
     H3_REQUEST_CANCELLED = NGHTTP3_H3_REQUEST_CANCELLED,
@@ -797,8 +801,15 @@ void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
     }
 
     if (!chunk.empty()) {
-        // Buffer the remainder; consume_stream will be called as data is drained
-        self->push_unread_data(conn_id, conn, chunk);
+        // Buffer the remainder; consume_stream will be called as data is drained.
+        // Bound the hold so multi-stream bulk cannot pin hundreds of MB in RSS.
+        if (!self->push_unread_data(conn_id, conn, chunk)) {
+            log_stream(self, stream_id, warn,
+                    "Unread buffer full (cap={}B) — closing connection R:{}", H3_MAX_UNREAD_PER_CONN, conn_id);
+            self->close_tcp_connection(conn_id, false);
+            self->m_h3_client->consume_stream(stream_id, chunk.size());
+            return;
+        }
         return;
     }
 }
@@ -1138,6 +1149,9 @@ std::optional<uint64_t> Http3Upstream::get_stream_id(uint64_t id) const {
 }
 
 bool Http3Upstream::push_unread_data(uint64_t conn_id, TcpConnection *conn, U8View data) const {
+    if (data.empty()) {
+        return true;
+    }
     if (conn->unread_data == nullptr) {
         conn->unread_data = this->vpn->make_buffer(conn_id);
         if (std::optional<std::string> err = conn->unread_data->init(); err.has_value()) {
@@ -1146,12 +1160,20 @@ bool Http3Upstream::push_unread_data(uint64_t conn_id, TcpConnection *conn, U8Vi
         }
     }
 
+    const size_t have = conn->unread_data->size();
+    if (have >= H3_MAX_UNREAD_PER_CONN || data.size() > (H3_MAX_UNREAD_PER_CONN - have)) {
+        log_conn(this, conn_id, dbg, "Unread buffer full have={} +{} cap={}", have, data.size(),
+                H3_MAX_UNREAD_PER_CONN);
+        return false;
+    }
+
     std::optional<std::string> err = conn->unread_data->push(data);
     if (err.has_value()) {
         log_conn(this, conn_id, err, "Failed to store data in buffer: {}", *err);
+        return false;
     }
 
-    return !err.has_value();
+    return true;
 }
 
 int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) {
@@ -1175,7 +1197,15 @@ int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) 
             }
         } else if (r < 0) {
             return r;
+        } else {
+            // r == 0: peer not ready; stop to avoid busy-loop
+            break;
         }
+    }
+
+    // Release empty buffer so long-lived sessions do not keep peak heap after bulk.
+    if (pending->size() == 0) {
+        conn->unread_data.reset();
     }
 
     return 0;
