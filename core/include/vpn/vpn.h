@@ -38,6 +38,8 @@ static constexpr int VPN_DEFAULT_RECOVERY_LOCATION_UPDATE_PERIOD_MS = 10 * 1000;
 // First recovery attempt should start immediately; backoff applies to later attempts.
 // (A 1s forced wait + fail-closed kill-switch = "Destination Port Unreachable" on LAN.)
 static constexpr int VPN_DEFAULT_INITIAL_RECOVERY_INTERVAL_MS = 0;
+// Min gap between recovery *fires* after a successful reconnect cycle (anti-thrash under flapping path).
+static constexpr int VPN_MIN_RECOVERY_FIRE_GAP_MS = 2000;
 static constexpr int VPN_DEFAULT_CONNECT_ATTEMPTS_NUM = 5;
 static constexpr int VPN_DEFAULT_FALLBACK_CONNECT_DELAY_MS = 1 * 1000;
 static constexpr int VPN_DEFAULT_POSTPONEMENT_WINDOW_MS = 3 * 1000; // how long after recovery starts connections are postponed instead of bypassed
