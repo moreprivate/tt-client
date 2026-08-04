@@ -797,18 +797,20 @@ void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
     }
 
     if (!chunk.empty()) {
-        // Own the bytes in the app unread buffer, then consume immediately so the
-        // QUIC/H3 stack does not also retain them (double-hold was a sticky RSS leak
-        // under backpressure: stack buffer + MemoryBuffer copy until process restart).
-        const size_t buffered = chunk.size();
+        // Buffer remainder; do NOT consume until drained. Leaving data unconsumed
+        // applies QUIC stream flow control so the peer stops — natural backpressure.
+        // Consuming immediately then closing at an app-side cap (earlier attempt)
+        // destroyed multi-stream download: streams hit 1 MiB and were reset.
+        // Reclaim is free-on-empty after drain + MemoryBuffer chunk drop, not FC thrash.
         if (!self->push_unread_data(conn_id, conn, chunk)) {
+            // Safety only if app buffer somehow exceeds stream window; do not tear down
+            // healthy bulk flows — drop this chunk only after logging (FC should prevent).
             log_stream(self, stream_id, warn,
-                    "Unread buffer full (cap={}B) — closing connection R:{}", H3_MAX_UNREAD_PER_CONN, conn_id);
-            self->close_tcp_connection(conn_id, false);
-            self->m_h3_client->consume_stream(stream_id, buffered);
+                    "Unread buffer full (have+chunk > cap={}) R:{} — applying FC by not consuming",
+                    H3_MAX_UNREAD_PER_CONN, conn_id);
             return;
         }
-        self->m_h3_client->consume_stream(stream_id, buffered);
+        // consume deferred until read_out_pending_data drains (FC holds the rest in stack)
         return;
     }
 }
@@ -1190,7 +1192,10 @@ int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) 
         int r = this->raise_read_event(conn_id, res.data);
         if (r > 0) {
             pending->drain(r);
-            // QUIC already consumed when we buffered (see on_body); no second consume.
+            // Release QUIC stream credit only as app delivers to LAN (single hold).
+            if (m_h3_client) {
+                m_h3_client->consume_stream(conn->stream_id, r);
+            }
         } else if (r < 0) {
             return r;
         } else {
