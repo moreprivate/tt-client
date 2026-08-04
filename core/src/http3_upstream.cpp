@@ -303,6 +303,9 @@ void Http3Upstream::close_session() {
     m_health_check_info.reset();
     m_idle_timeout_at_ns.reset();
     m_close_on_idle_task_id.reset();
+    m_last_inbound_steady_ms.reset();
+    m_total_unread_bytes = 0;
+    m_conn_fc_surplus = 0;
     m_state = H3US_IDLE;
     m_closed = false;
 
@@ -394,7 +397,20 @@ ssize_t Http3Upstream::send(uint64_t id, const uint8_t *data, size_t length) {
     return (int) r;
 }
 
-void Http3Upstream::consume(uint64_t, size_t) {
+void Http3Upstream::consume(uint64_t id, size_t length) {
+    // CLIENT_EVENT_DATA_SENT: LAN TCP accepted/sent these bytes. Mirror H2 stream FC.
+    if (length == 0 || !m_h3_client) {
+        return;
+    }
+    auto it = m_tcp_connections.find(id);
+    if (it == m_tcp_connections.end()) {
+        return;
+    }
+    credit_stream_fc(it->second.stream_id, length);
+    // Emit MAX_STREAM_DATA / MAX_DATA; safe outside the packet input handler.
+    if (!m_in_handler) {
+        m_h3_client->flush();
+    }
 }
 
 size_t Http3Upstream::available_to_send(uint64_t id) {
@@ -434,17 +450,16 @@ void Http3Upstream::update_flow_control(uint64_t id, TcpFlowCtrlInfo info) {
     }
 
     TcpConnection *conn = &conn_it->second;
-    if (conn->flags.test(TcpConnection::TCF_READ_ENABLED) == (info.send_buffer_size > 0)) {
-        // nothing to do
-        return;
+    // Match Http2Upstream: update the flag when it changes, but always re-arm
+    // pending drain when READ is enabled (early-return on "flag unchanged" left
+    // buffered H3 body stranded until the next packet / process restart).
+    if (conn->flags.test(TcpConnection::TCF_READ_ENABLED) != (info.send_buffer_size > 0)) {
+        log_conn(this, id, trace, "Read {}", info.send_buffer_size > 0 ? "on" : "off");
+        conn->flags.set(TcpConnection::TCF_READ_ENABLED, info.send_buffer_size > 0);
     }
-
-    log_conn(this, id, trace, "Read {}", info.send_buffer_size > 0 ? "on" : "off");
-    conn->flags.set(TcpConnection::TCF_READ_ENABLED, info.send_buffer_size > 0);
 
     if (conn->flags.test(TcpConnection::TCF_READ_ENABLED) && !m_complete_read_task_id.has_value()
             && conn->has_unread_data()) {
-        // we have some unread data on the connection - complete it
         m_complete_read_task_id = event_loop::submit(vpn->parameters.ev_loop, {this, complete_read});
     }
 }
@@ -754,7 +769,11 @@ void Http3Upstream::on_response(void *arg, uint64_t stream_id, http::Response re
     self->handle_response(stream_id, &headers);
 }
 
-// Called when body data arrives on a stream. Data is pushed by Http3Client
+// Called when body data arrives on a stream. Data is pushed by Http3Client.
+// TCP CONNECT body FC mirrors HTTP/2:
+//   - connection window: credit immediately (credit_connection_fc) so one slow
+//     stream cannot wedge every download on the shared connection window
+//   - stream window: credit in Http3Upstream::consume when LAN DATA_SENT fires
 void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
     auto *self = (Http3Upstream *) arg;
     if (self->m_udp_mux.get_stream_id() == stream_id) {
@@ -782,37 +801,50 @@ void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
         return;
     }
 
+    const size_t body_len = chunk.size();
+
+    // Drain any existing app unread before taking more (keeps order).
+    if (conn->has_unread_data()) {
+        self->process_pending_data(stream_id);
+        // Re-resolve: process_pending_data may close the connection.
+        auto again = self->get_tcp_conn_by_stream_id(stream_id);
+        if (again.second == nullptr) {
+            // Connection gone — release both FC levels for this chunk.
+            self->m_h3_client->consume_stream(stream_id, body_len);
+            return;
+        }
+        conn_id = again.first;
+        conn = again.second;
+    }
+
     if (conn->flags.test(TcpConnection::TCF_READ_ENABLED) && !conn->has_unread_data()) {
-        // Try to forward directly without buffering
         int r = self->raise_read_event(conn_id, chunk);
         if (r < 0) {
             self->close_tcp_connection(conn_id, false);
-            self->m_h3_client->consume_stream(stream_id, chunk.size());
+            self->m_h3_client->consume_stream(stream_id, body_len);
             return;
         }
         chunk.remove_prefix(r);
-        if (r > 0) {
-            self->m_h3_client->consume_stream(stream_id, r);
-        }
+        // Stream FC for the `r` bytes is deferred to DATA_SENT (consume()).
     }
 
     if (!chunk.empty()) {
-        // Buffer remainder; do NOT consume until drained. Leaving data unconsumed
-        // applies QUIC stream flow control so the peer stops — natural backpressure.
-        // Consuming immediately then closing at an app-side cap (earlier attempt)
-        // destroyed multi-stream download: streams hit 1 MiB and were reset.
-        // Reclaim is free-on-empty after drain + MemoryBuffer chunk drop, not FC thrash.
+        // Must copy undelivered body — on_body pointers are one-shot. Never drop.
         if (!self->push_unread_data(conn_id, conn, chunk)) {
-            // Safety only if app buffer somehow exceeds stream window; do not tear down
-            // healthy bulk flows — drop this chunk only after logging (FC should prevent).
-            log_stream(self, stream_id, warn,
-                    "Unread buffer full (have+chunk > cap={}) R:{} — applying FC by not consuming",
-                    H3_MAX_UNREAD_PER_CONN, conn_id);
+            log_stream(self, stream_id, err, "Failed to buffer body ({}B) R:{} — closing stream", chunk.size(),
+                    conn_id);
+            self->close_tcp_connection(conn_id, false);
+            self->m_h3_client->consume_stream(stream_id, body_len);
             return;
         }
-        // consume deferred until read_out_pending_data drains (FC holds the rest in stack)
-        return;
+        if (self->m_total_unread_bytes > H3_MAX_UNREAD_GLOBAL) {
+            log_stream(self, stream_id, warn, "App unread high water total={} (soft={}) R:{}",
+                    self->m_total_unread_bytes, H3_MAX_UNREAD_GLOBAL, conn_id);
+        }
     }
+
+    // Connection-level FC now (multi-stream stays open). Stream-level on DATA_SENT.
+    self->credit_connection_fc(body_len);
 }
 
 // Called when a stream is closed (FIN or RST)
@@ -1125,7 +1157,13 @@ void Http3Upstream::clean_tcp_connection_data(uint64_t id) {
 
     TcpConnection *conn = &i->second;
     if (conn->has_unread_data()) {
-        log_conn(this, id, dbg, "Remaining unread={}", conn->unread_data->size());
+        const size_t leftover = conn->unread_data->size();
+        log_conn(this, id, dbg, "Remaining unread={}", leftover);
+        if (m_total_unread_bytes >= leftover) {
+            m_total_unread_bytes -= leftover;
+        } else {
+            m_total_unread_bytes = 0;
+        }
     }
 
     m_tcp_conn_by_stream_id.erase(conn->stream_id);
@@ -1149,7 +1187,7 @@ std::optional<uint64_t> Http3Upstream::get_stream_id(uint64_t id) const {
     return stream_id;
 }
 
-bool Http3Upstream::push_unread_data(uint64_t conn_id, TcpConnection *conn, U8View data) const {
+bool Http3Upstream::push_unread_data(uint64_t conn_id, TcpConnection *conn, U8View data) {
     if (data.empty()) {
         return true;
     }
@@ -1161,20 +1199,39 @@ bool Http3Upstream::push_unread_data(uint64_t conn_id, TcpConnection *conn, U8Vi
         }
     }
 
-    const size_t have = conn->unread_data->size();
-    if (h3_unread_would_exceed_cap(have, data.size(), H3_MAX_UNREAD_PER_CONN)) {
-        log_conn(this, conn_id, dbg, "Unread buffer full have={} +{} cap={}", have, data.size(),
-                H3_MAX_UNREAD_PER_CONN);
-        return false;
-    }
-
+    // Never refuse body for soft caps — dropping on_body data corrupts the tunnel.
     std::optional<std::string> err = conn->unread_data->push(data);
     if (err.has_value()) {
         log_conn(this, conn_id, err, "Failed to store data in buffer: {}", *err);
         return false;
     }
 
+    m_total_unread_bytes += data.size();
     return true;
+}
+
+void Http3Upstream::credit_connection_fc(size_t length) {
+    if (!m_h3_client || length == 0) {
+        return;
+    }
+    const size_t to_extend = h3_conn_credit_to_extend(length, m_conn_fc_surplus);
+    if (to_extend > 0) {
+        if (auto err = m_h3_client->consume_connection(to_extend); err != nullptr) {
+            log_upstream(this, dbg, "consume_connection({}) failed: {}", to_extend, err->str());
+        }
+    }
+}
+
+void Http3Upstream::credit_stream_fc(uint64_t stream_id, size_t length) {
+    if (!m_h3_client || length == 0) {
+        return;
+    }
+    // Combined API: stream + connection. Surplus keeps connection accounting honest.
+    if (auto err = m_h3_client->consume_stream(stream_id, length); err != nullptr) {
+        log_stream(this, stream_id, dbg, "consume_stream({}) failed: {}", length, err->str());
+        return;
+    }
+    h3_note_combined_stream_conn_credit(length, m_conn_fc_surplus);
 }
 
 int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) {
@@ -1192,10 +1249,12 @@ int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) 
         int r = this->raise_read_event(conn_id, res.data);
         if (r > 0) {
             pending->drain(r);
-            // Release QUIC stream credit only as app delivers to LAN (single hold).
-            if (m_h3_client) {
-                m_h3_client->consume_stream(conn->stream_id, r);
+            if (m_total_unread_bytes >= size_t(r)) {
+                m_total_unread_bytes -= size_t(r);
+            } else {
+                m_total_unread_bytes = 0;
             }
+            // Stream FC when LAN DATA_SENT → consume(); do not credit here.
         } else if (r < 0) {
             return r;
         } else {

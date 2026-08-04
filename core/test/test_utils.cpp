@@ -25,17 +25,35 @@ TEST(HealthCheckProbeSkip, SkipsWhenRecentInbound) {
     EXPECT_EQ(health_check_busy_skip_max_age_ms(0, 0), 1u);
 }
 
-// Long-lived stability: shipped windows + unread gate (reclaim via free-on-empty + FC).
+// Long-lived multi-stream: OpenWrt-sized windows; soft unread hints (no drop-on-cap).
 TEST(QuicLongLivedBounds, WindowsAndUnreadCap) {
-    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 100ull * 1024 * 1024);
-    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 1ull * 1024 * 1024);
-    EXPECT_EQ(H3_MAX_UNREAD_PER_CONN, 4ull * 1024 * 1024);
-    // Real shipped gate used by Http3Upstream::push_unread_data
+    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 8ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 256ull * 1024);
+    EXPECT_EQ(H3_MAX_UNREAD_PER_CONN, size_t(QUIC_STREAM_WINDOW_SIZE));
+    EXPECT_EQ(H3_MAX_UNREAD_GLOBAL, size_t(QUIC_CONNECTION_WINDOW_SIZE));
     EXPECT_FALSE(h3_unread_would_exceed_cap(0, 1, H3_MAX_UNREAD_PER_CONN));
-    EXPECT_FALSE(h3_unread_would_exceed_cap(H3_MAX_UNREAD_PER_CONN - 1, 1, H3_MAX_UNREAD_PER_CONN));
     EXPECT_TRUE(h3_unread_would_exceed_cap(H3_MAX_UNREAD_PER_CONN, 1, H3_MAX_UNREAD_PER_CONN));
-    EXPECT_TRUE(h3_unread_would_exceed_cap(H3_MAX_UNREAD_PER_CONN - 1, 2, H3_MAX_UNREAD_PER_CONN));
-    EXPECT_TRUE(h3_unread_would_exceed_cap(0, H3_MAX_UNREAD_PER_CONN + 1, H3_MAX_UNREAD_PER_CONN));
+    EXPECT_TRUE(h3_global_unread_would_exceed(H3_MAX_UNREAD_GLOBAL, 1, H3_MAX_UNREAD_GLOBAL));
+}
+
+// Connection surplus keeps H2-style split honest when consume_stream also extends conn.
+TEST(QuicLongLivedBounds, ConnFcSurplusAccounting) {
+    size_t surplus = 0;
+    EXPECT_EQ(h3_conn_credit_to_extend(1000, surplus), 1000u);
+    EXPECT_EQ(surplus, 0u);
+
+    h3_note_combined_stream_conn_credit(1000, surplus);
+    EXPECT_EQ(surplus, 1000u);
+
+    // Next receive pays surplus first (no extra connection extend).
+    EXPECT_EQ(h3_conn_credit_to_extend(1000, surplus), 0u);
+    EXPECT_EQ(surplus, 0u);
+
+    h3_note_combined_stream_conn_credit(1000, surplus);
+    EXPECT_EQ(h3_conn_credit_to_extend(400, surplus), 0u);
+    EXPECT_EQ(surplus, 600u);
+    EXPECT_EQ(h3_conn_credit_to_extend(700, surplus), 100u);
+    EXPECT_EQ(surplus, 0u);
 }
 
 class TunnelAddressTest : public testing::TestWithParam<std::pair<TunnelAddress, TunnelAddress>> {
