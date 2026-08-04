@@ -25,12 +25,11 @@ TEST(HealthCheckProbeSkip, SkipsWhenRecentInbound) {
     EXPECT_EQ(health_check_busy_skip_max_age_ms(0, 0), 1u);
 }
 
-// Long-lived stability: shipped windows + unread fail-closed gate (not 100 MiB sticky pin).
+// Long-lived stability: shipped windows + unread gate (reclaim via free-on-empty + FC).
 TEST(QuicLongLivedBounds, WindowsAndUnreadCap) {
-    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 32ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 100ull * 1024 * 1024);
     EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 1ull * 1024 * 1024);
-    EXPECT_LT(QUIC_CONNECTION_WINDOW_SIZE, 100ull * 1024 * 1024);
-    EXPECT_EQ(H3_MAX_UNREAD_PER_CONN, 1024ull * 1024);
+    EXPECT_EQ(H3_MAX_UNREAD_PER_CONN, 4ull * 1024 * 1024);
     // Real shipped gate used by Http3Upstream::push_unread_data
     EXPECT_FALSE(h3_unread_would_exceed_cap(0, 1, H3_MAX_UNREAD_PER_CONN));
     EXPECT_FALSE(h3_unread_would_exceed_cap(H3_MAX_UNREAD_PER_CONN - 1, 1, H3_MAX_UNREAD_PER_CONN));
