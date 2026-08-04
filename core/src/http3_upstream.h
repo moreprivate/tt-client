@@ -107,6 +107,10 @@ private:
     int m_kex_group_nid = NID_undef;
     /// Steady-clock ms of last inbound UDP (data-plane). Used to skip HC CONNECT under load.
     std::optional<int64_t> m_last_inbound_steady_ms;
+    /// Sum of app-side unread buffer sizes (for logging / free-on-empty accounting).
+    size_t m_total_unread_bytes = 0;
+    /// Connection FC already extended via consume_stream (combined API); see h3_long_lived_bounds.h.
+    size_t m_conn_fc_surplus = 0;
 
     /**
      * A point in time when our idle timer expires.
@@ -170,9 +174,13 @@ private:
     void clean_tcp_connection_data(uint64_t id);
     [[nodiscard]] bool is_health_check_stream(uint64_t stream_id) const;
     [[nodiscard]] std::optional<uint64_t> get_stream_id(uint64_t id) const;
-    bool push_unread_data(uint64_t conn_id, TcpConnection *conn, U8View data) const;
+    bool push_unread_data(uint64_t conn_id, TcpConnection *conn, U8View data);
     int read_out_pending_data(uint64_t conn_id, TcpConnection *conn);
     int raise_read_event(uint64_t conn_id, U8View data);
+    /** Connection-level FC for accepted body (H2: consume_connection on receive). */
+    void credit_connection_fc(size_t length);
+    /** Stream-level FC when LAN accepted bytes (H2: consume on DATA_SENT). */
+    void credit_stream_fc(uint64_t stream_id, size_t length);
     void poll_tcp_connections();
     void poll_mux_connections();
     void poll_connections();
