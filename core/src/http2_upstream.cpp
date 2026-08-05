@@ -183,8 +183,10 @@ void Http2Upstream::http_handler(void *arg, HttpEventId what, void *data) {
 
         auto found = upstream->get_conn_by_stream_id(http_event->stream_id);
         if (found.second == nullptr) {
-            log_upstream(upstream, dbg, "Got data on closed connection: stream={}", http_event->stream_id);
-            assert(0);
+            // Late DATA after stream cleanup — discard, do not touch freed conn state.
+            log_upstream(upstream, warn, "Got data on closed/unknown connection: stream={} len={}",
+                    http_event->stream_id, http_event->length);
+            http_event->result = (int) http_event->length; // consume so nghttp2 does not stall
             break;
         }
 
