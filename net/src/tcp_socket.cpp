@@ -1239,11 +1239,15 @@ void tcp_socket_update_timeout(TcpSocket *sock) {
     }
     if (sock->subscribe_id.has_value()) {
         socket_manager_timer_unsubscribe(sock->parameters.socket_manager, *sock->subscribe_id);
+        sock->subscribe_id.reset();
     }
     if (sock->parameters.timeout.count()) {
         sock->timeout_ts = get_next_timeout_ts(sock);
         sock->subscribe_id = socket_manager_timer_subscribe(sock->parameters.socket_manager, sock->parameters.ev_loop,
                 uint32_t(sock->parameters.timeout.count()), timer_callback, sock);
+    } else {
+        // Explicitly clear so a stale timeout_ts cannot fire after idle timeout is disabled.
+        sock->timeout_ts = {};
     }
 }
 

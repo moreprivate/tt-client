@@ -80,6 +80,9 @@ public:
 
     int disconnect();
 
+    /** In-process reconnect after non-fatal DISCONNECTED (daemon mode; keeps TUN). */
+    void request_reconnect();
+
     void notify_network_change(VpnNetworkState state);
 
     void notify_sleep();

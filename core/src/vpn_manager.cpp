@@ -374,7 +374,25 @@ void vpn_force_reconnect(Vpn *vpn) {
     std::unique_lock l(vpn->stop_guard);
 
     vpn->submit([vpn]() {
-        vpn->fsm.perform_transition(vpn_fsm::CE_DO_RECOVERY, nullptr);
+        const auto state = (VpnSessionState) vpn->fsm.get_state();
+        // Daemon/OpenWrt: process must stay up across recoverable disconnects.
+        // Historical path left DISCONNECTED idle until process exit + procd respawn
+        // tore down tun0. Re-enter connect/recovery in-process instead.
+        if (state == VPN_SS_DISCONNECTED) {
+            log_vpn(vpn, info, "force_reconnect from DISCONNECTED — CE_DO_CONNECT");
+            vpn->pending_error.reset();
+            vpn->fsm.perform_transition(vpn_fsm::CE_DO_CONNECT, nullptr);
+        } else if (state == VPN_SS_WAITING_RECOVERY) {
+            log_vpn(vpn, info, "force_reconnect from WAITING_RECOVERY — CE_DO_RECOVERY");
+            vpn->fsm.perform_transition(vpn_fsm::CE_DO_RECOVERY, nullptr);
+        } else if (state == VPN_SS_CONNECTED || state == VPN_SS_RECOVERING || state == VPN_SS_CONNECTING) {
+            log_vpn(vpn, info, "force_reconnect from {} — enter recovery", magic_enum::enum_name(state));
+            VpnError e = {VPN_EC_ERROR, "Forced reconnect"};
+            vpn->pending_error = e;
+            vpn->fsm.perform_transition(vpn_fsm::CE_CLIENT_DISCONNECTED, &e);
+        } else {
+            log_vpn(vpn, warn, "force_reconnect ignored in state {}", magic_enum::enum_name(state));
+        }
     });
 
     log_vpn(vpn, info, "Done");

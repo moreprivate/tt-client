@@ -80,7 +80,8 @@ private:
             int upstream_id, uint64_t conn_id, const TunnelAddressPair *addr, int proto, std::string_view app_name);
     void proceed_pending_connection(int upstream_id, uint64_t conn_id, const PendingConnection *conn);
     [[nodiscard]] size_t connections_num_by_upstream(int upstream_id) const;
-    void close_upstream(int upstream_id);
+    /** @param replenish if true and pool still non-empty, open a replacement child (soft death). */
+    void close_upstream(int upstream_id, bool replenish = true);
     void handle_sleep() override;
     void handle_wake() override;
     int kex_group_nid() const override;
