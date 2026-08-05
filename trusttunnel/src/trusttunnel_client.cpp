@@ -2,6 +2,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
+#include <cstdint>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +19,7 @@
 #ifndef _WIN32
 #include <dirent.h>
 #include <fcntl.h>
+#include <ucontext.h>
 #include <unistd.h>
 #endif
 
@@ -55,6 +57,8 @@ using namespace ag;
 
 static const ag::Logger g_logger("TRUSTTUNNEL_CLIENT_APP");
 static std::atomic_bool keep_running{true};
+// Set when process is intentionally stopping (SIGTERM/SIGINT); skip reconnect.
+static std::atomic_bool g_shutting_down{false};
 static std::condition_variable g_waiter;
 static std::mutex g_waiter_mutex;
 static std::weak_ptr<TrustTunnelClient> g_client;
@@ -212,29 +216,8 @@ static void dump_process_diagnostics(const char *why) {
 }
 
 #ifndef _WIN32
-/** Async-signal-safe minimal dump (only write/open/read). */
-static void dump_process_diagnostics_signal_safe(int sig) {
-    const char *name = "SIGNAL";
-    if (sig == SIGSEGV) {
-        name = "SIGSEGV";
-    } else if (sig == SIGABRT) {
-        name = "SIGABRT";
-    } else if (sig == SIGBUS) {
-        name = "SIGBUS";
-    } else if (sig == SIGFPE) {
-        name = "SIGFPE";
-    } else if (sig == SIGILL) {
-        name = "SIGILL";
-    }
-    const char head[] = "\n========== trusttunnel_client FATAL_SIGNAL ";
-    const char mid[] = " last_event=";
-    const char tail[] = " ==========\n";
-    (void) write(STDERR_FILENO, head, sizeof(head) - 1);
-    (void) write(STDERR_FILENO, name, strlen(name));
-    (void) write(STDERR_FILENO, mid, sizeof(mid) - 1);
-    (void) write(STDERR_FILENO, g_last_event, strlen(g_last_event));
-    (void) write(STDERR_FILENO, tail, sizeof(tail) - 1);
-
+/** Async-signal-safe /proc dump (header printed by fatal_signal_handler). */
+static void dump_process_diagnostics_signal_safe(int /*sig*/) {
     auto dump_path = [](const char *path) {
         int fd = open(path, O_RDONLY);
         if (fd < 0) {
@@ -258,6 +241,7 @@ static void dump_process_diagnostics_signal_safe(int sig) {
 #endif
 
 static void stop_trusttunnel_client(const char *why = "stop_trusttunnel_client") {
+    g_shutting_down.store(true);
     note_event("stop_trusttunnel_client: %s", why ? why : "unspecified");
     dump_process_diagnostics(why ? why : "stop_trusttunnel_client");
     keep_running = false;
@@ -296,9 +280,65 @@ static void sighandler(int sig) {
 }
 
 #ifndef _WIN32
-static void fatal_signal_handler(int sig) {
+static void write_hex_ptr(uintptr_t v) {
+    char buf[2 + sizeof(uintptr_t) * 2 + 1];
+    static const char hex[] = "0123456789abcdef";
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = (int) sizeof(uintptr_t) * 2 - 1; i >= 0; --i) {
+        buf[2 + i] = hex[v & 0xf];
+        v >>= 4;
+    }
+    buf[2 + sizeof(uintptr_t) * 2] = '\0';
+    (void) write(STDERR_FILENO, buf, 2 + sizeof(uintptr_t) * 2);
+}
+
+// SA_SIGINFO: print fault address + PC so we stop guessing the crash site.
+static void fatal_signal_handler(int sig, siginfo_t *info, void *ucontext) {
+    const char *name = "SIGNAL";
+    if (sig == SIGSEGV) {
+        name = "SIGSEGV";
+    } else if (sig == SIGABRT) {
+        name = "SIGABRT";
+    } else if (sig == SIGBUS) {
+        name = "SIGBUS";
+    } else if (sig == SIGFPE) {
+        name = "SIGFPE";
+    } else if (sig == SIGILL) {
+        name = "SIGILL";
+    }
+
+    const char head[] = "\n========== trusttunnel_client FATAL_SIGNAL ";
+    (void) write(STDERR_FILENO, head, sizeof(head) - 1);
+    (void) write(STDERR_FILENO, name, strlen(name));
+    const char mid[] = " last_event=";
+    (void) write(STDERR_FILENO, mid, sizeof(mid) - 1);
+    (void) write(STDERR_FILENO, g_last_event, strlen(g_last_event));
+    const char si[] = " si_addr=";
+    (void) write(STDERR_FILENO, si, sizeof(si) - 1);
+    write_hex_ptr(info ? (uintptr_t) info->si_addr : 0);
+    const char pc_l[] = " pc=";
+    (void) write(STDERR_FILENO, pc_l, sizeof(pc_l) - 1);
+#if defined(__aarch64__) && defined(__linux__)
+    auto *uc = (ucontext_t *) ucontext;
+    write_hex_ptr(uc ? (uintptr_t) uc->uc_mcontext.pc : 0);
+#elif defined(__x86_64__) && defined(__linux__)
+    auto *uc = (ucontext_t *) ucontext;
+    write_hex_ptr(uc ? (uintptr_t) uc->uc_mcontext.gregs[REG_RIP] : 0);
+#else
+    write_hex_ptr(0);
+    (void) ucontext;
+#endif
+    const char tail[] = " ==========\n";
+    (void) write(STDERR_FILENO, tail, sizeof(tail) - 1);
+
     dump_process_diagnostics_signal_safe(sig);
-    signal(sig, SIG_DFL);
+
+    // Restore default and re-raise so procd sees the real signal.
+    struct sigaction sa {};
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sigaction(sig, &sa, nullptr);
     raise(sig);
 }
 #endif
@@ -309,11 +349,17 @@ static void setup_sighandler() {
     signal(SIGTERM, sighandler);
 #else
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGSEGV, fatal_signal_handler);
-    signal(SIGABRT, fatal_signal_handler);
-    signal(SIGBUS, fatal_signal_handler);
-    signal(SIGFPE, fatal_signal_handler);
-    signal(SIGILL, fatal_signal_handler);
+    {
+        struct sigaction sa {};
+        sa.sa_sigaction = fatal_signal_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        sigaction(SIGSEGV, &sa, nullptr);
+        sigaction(SIGABRT, &sa, nullptr);
+        sigaction(SIGBUS, &sa, nullptr);
+        sigaction(SIGFPE, &sa, nullptr);
+        sigaction(SIGILL, &sa, nullptr);
+    }
     std::atexit(on_atexit_dump);
     // Block SIGINT and SIGTERM - they will be waited using sigwait().
     sigset_t sigset; // NOLINT(cppcoreguidelines-init-variables)
@@ -547,6 +593,10 @@ static std::function<void(VpnStateChangedEvent *)> get_state_changed_callback() 
             }
             // Full dump only on disconnect (not every state — caused OpenWrt load spike).
             dump_process_diagnostics("VPN_SS_DISCONNECTED");
+            if (g_shutting_down.load()) {
+                note_event("DISCONNECTED during shutdown — no reconnect");
+                break;
+            }
             if (is_fatal_disconnect_error(code)) {
                 stop_trusttunnel_client("fatal_disconnect");
             } else if (auto client = g_client.lock()) {
