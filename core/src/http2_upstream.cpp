@@ -364,6 +364,9 @@ int Http2Upstream::establish_http_session() {
 
 void Http2Upstream::net_handler(void *arg, TcpSocketEvent what, void *data) {
     Http2Upstream *upstream = (Http2Upstream *) arg;
+    if (upstream == nullptr) {
+        return;
+    }
 
     // Bufferevent writes can synchronously raise flush events while writing in socket,
     // so a boolean flag is not enough here.
@@ -605,6 +608,12 @@ void Http2Upstream::close_session_inner(std::optional<VpnError> error) {
 }
 
 void Http2Upstream::close_session() {
+    // Idempotent: mux may call close_session after close_session_inner already did.
+    if (m_socket == nullptr && m_session == nullptr && m_tcp_connections.empty()) {
+        log_upstream(this, dbg, "Closing HTTP/2 session (already closed)");
+        return;
+    }
+
     log_upstream(this, info, "Closing HTTP/2 session");
 
     m_closing = true;
