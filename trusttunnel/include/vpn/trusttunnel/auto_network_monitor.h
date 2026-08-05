@@ -28,5 +28,8 @@ private:
     std::unique_ptr<ag::utils::NetworkMonitor> m_network_monitor;
     UniquePtr<VpnEventLoop, &vpn_event_loop_destroy> m_network_monitor_loop = nullptr;
     std::thread m_network_monitor_loop_thread;
+    // Debounce path-change notifications (same uplink re-CONNECTED after tun0 ifup).
+    std::string m_last_if_name;
+    bool m_last_connected = false;
 };
 } // namespace ag

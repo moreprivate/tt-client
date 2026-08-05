@@ -65,8 +65,10 @@ static constexpr FsmTransitionEntry TRANSITION_TABLE[] = {
         {VPN_SS_CONNECTING,       CE_ABANDON_ENDPOINT,    Fsm::OTHERWISE,           retry_connect,          Fsm::SAME_TARGET_STATE,  Fsm::DO_NOTHING},
         {VPN_SS_CONNECTING,       CE_NETWORK_CHANGE,      no_connect_attempts,      fail_connect_with_no_attempts, VPN_SS_DISCONNECTED, raise_state},
         {VPN_SS_CONNECTING,       CE_NETWORK_CHANGE,      network_lost,             do_disconnect,          VPN_SS_WAITING_FOR_NETWORK, raise_state},
-        {VPN_SS_CONNECTING,       CE_NETWORK_CHANGE,      fall_into_recovery,       prepare_for_recovery,   VPN_SS_WAITING_RECOVERY, raise_state},
-        {VPN_SS_CONNECTING,       CE_NETWORK_CHANGE,      Fsm::OTHERWISE,           retry_connect,          Fsm::SAME_TARGET_STATE,  Fsm::DO_NOTHING},
+        // OpenWrt: tun0 ifup fires VPN_NS_CONNECTED while still CONNECTING. That must NOT
+        // abort into recovery (was: fall_into_recovery → WAITING_RECOVERY with error=0).
+        // Keep connecting; only network *loss* is actionable here.
+        {VPN_SS_CONNECTING,       CE_NETWORK_CHANGE,      Fsm::OTHERWISE,           Fsm::DO_NOTHING,        Fsm::SAME_TARGET_STATE,  Fsm::DO_NOTHING},
 
         {VPN_SS_CONNECTED,        CE_NETWORK_CHANGE,      network_lost,             do_disconnect,           VPN_SS_WAITING_FOR_NETWORK, raise_state},
         {VPN_SS_CONNECTED,        CE_NETWORK_CHANGE,      Fsm::OTHERWISE,           prepare_for_recovery_nc, VPN_SS_WAITING_RECOVERY,    raise_state},
@@ -81,8 +83,9 @@ static constexpr FsmTransitionEntry TRANSITION_TABLE[] = {
         {VPN_SS_WAITING_RECOVERY, CE_CLIENT_DISCONNECTED, Fsm::OTHERWISE,           Fsm::DO_NOTHING,        Fsm::SAME_TARGET_STATE,  Fsm::DO_NOTHING},
         {VPN_SS_WAITING_RECOVERY, CE_ABANDON_ENDPOINT,    is_fatal_error,           do_disconnect,          VPN_SS_DISCONNECTED,     raise_state},
 
+        // While recovering, CONNECTED re-notifications (tun0/SQM/firewall) must not restart recovery.
         {VPN_SS_RECOVERING,       CE_NETWORK_CHANGE,      network_lost,             do_disconnect,           VPN_SS_WAITING_FOR_NETWORK, raise_state},
-        {VPN_SS_RECOVERING,       CE_NETWORK_CHANGE,      Fsm::OTHERWISE,           prepare_for_recovery_nc, VPN_SS_WAITING_RECOVERY, raise_state},
+        {VPN_SS_RECOVERING,       CE_NETWORK_CHANGE,      Fsm::OTHERWISE,           Fsm::DO_NOTHING,         Fsm::SAME_TARGET_STATE,  Fsm::DO_NOTHING},
         {VPN_SS_RECOVERING,       CE_PING_READY,          Fsm::ANYWAY,              reconnect_client,       Fsm::SAME_TARGET_STATE,  Fsm::DO_NOTHING},
         {VPN_SS_RECOVERING,       CE_PING_FAIL,           is_fatal_error,           do_disconnect,          VPN_SS_DISCONNECTED,     raise_state},
         {VPN_SS_RECOVERING,       CE_PING_FAIL,           Fsm::OTHERWISE,           prepare_for_recovery,   VPN_SS_WAITING_RECOVERY, raise_state},
