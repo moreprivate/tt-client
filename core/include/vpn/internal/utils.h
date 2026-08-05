@@ -132,15 +132,19 @@ static const TunnelAddress HEALTH_CHECK_HOST(NamePort{"_check", 0});
  * Prefer max_age_ms = health_check_timeout (not full endpoint timeout) so a
  * quiet/half-dead path still gets a real probe within the HC budget.
  *
- * @param last_inbound_age_ms  age of last inbound, or nullopt if never
- * @param max_age_ms           treat session healthy if age < max_age_ms
+ * Callers should pass age of **application** progress (LAN body delivered, ICMP
+ * reply, successful HC), not raw transport RX — keepalives alone must not skip
+ * probes forever on a wedged data path.
+ *
+ * @param last_app_progress_age_ms  age of last app progress, or nullopt if never
+ * @param max_age_ms                treat session healthy if age < max_age_ms
  */
 inline bool should_skip_health_check_probe(
-        std::optional<uint64_t> last_inbound_age_ms, uint64_t max_age_ms) {
-    if (!last_inbound_age_ms.has_value()) {
+        std::optional<uint64_t> last_app_progress_age_ms, uint64_t max_age_ms) {
+    if (!last_app_progress_age_ms.has_value()) {
         return false;
     }
-    return *last_inbound_age_ms < max_age_ms;
+    return *last_app_progress_age_ms < max_age_ms;
 }
 
 /** @deprecated use should_skip_health_check_probe */

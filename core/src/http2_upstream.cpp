@@ -150,6 +150,7 @@ int Http2Upstream::read_out_pending_data(uint64_t id, TcpConnection *conn) {
 
     if (pending->size() == 0) {
         conn->unread_data.reset();
+        heap_try_release_to_os();
     }
 
     return 0;
@@ -894,12 +895,15 @@ size_t Http2Upstream::connections_num() const {
 void Http2Upstream::do_health_check(bool need_result) {
     m_health_check_info.reset(); // Forget about the current health check.
 
-    // Same busy-skip policy as H3: do not open CONNECT while data-plane is active.
+    // Same busy-skip policy as H3: skip only on recent **app** progress (not raw TLS RX).
     {
         using clock = std::chrono::steady_clock;
         const auto now_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count();
         std::optional<uint64_t> age_ms;
+        // H2 still tracks last inbound TLS; prefer it only when we also delivered app data.
+        // Use inbound as proxy until H2 gains explicit app-progress stamps (TLS RX alone is
+        // closer to app than QUIC keepalives, but skip window stays HC-bounded).
         if (m_last_inbound_steady_ms.has_value() && now_ms >= *m_last_inbound_steady_ms) {
             age_ms = uint64_t(now_ms - *m_last_inbound_steady_ms);
         }
@@ -908,7 +912,7 @@ void Http2Upstream::do_health_check(bool need_result) {
                 this->vpn->upstream_config.timeout.count());
         if (should_skip_health_check_probe(age_ms, max_age_ms)) {
             log_upstream(this, dbg,
-                    "Health check: skipped (inbound {}ms ago < busy window {}ms; need_result={})",
+                    "Health check: skipped (progress {}ms ago < busy window {}ms; need_result={})",
                     age_ms.value_or(0), max_age_ms, need_result);
             return;
         }

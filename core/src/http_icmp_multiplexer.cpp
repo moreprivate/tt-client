@@ -56,22 +56,38 @@ std::optional<uint64_t> HttpIcmpMultiplexer::get_stream_id() const {
 bool HttpIcmpMultiplexer::send_request(const IcmpEchoRequest &request) {
     ServerUpstream *upstream = m_params.parent;
 
-    switch (m_state) {
-    case MS_IDLE: {
+    auto open_stream = [this, upstream]() -> bool {
         assert(!m_stream_id.has_value());
         static const TunnelAddress ICMP_HOST(NamePort{"_icmp", 0});
         m_stream_id = m_params.send_connect_request_callback(upstream, &ICMP_HOST, "_icmp");
         if (!m_stream_id.has_value()) {
+            m_state = MS_IDLE;
             return false;
         }
         m_state = MS_ESTABLISHED;
-        [[fallthrough]];
+        return true;
+    };
+
+    switch (m_state) {
+    case MS_IDLE: {
+        if (!open_stream()) {
+            return false;
+        }
+        return this->send_request_established(request);
     }
     case MS_ESTABLISHED:
+        // Stream may be dead without a close callback (wedged H3). Retry once with a new CONNECT.
+        if (this->send_request_established(request)) {
+            return true;
+        }
+        this->close();
+        if (!open_stream()) {
+            return false;
+        }
         return this->send_request_established(request);
     }
 
-    return true;
+    return false;
 }
 
 void HttpIcmpMultiplexer::handle_response(const HttpHeaders *) {

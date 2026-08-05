@@ -3,9 +3,28 @@
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef __GLIBC__
+#include <malloc.h>
+#elif defined(__MACH__)
+#include <malloc/malloc.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#ifndef HeapOptimizeResources
+#define HeapOptimizeResources static_cast<HEAP_INFORMATION_CLASS>(3)
+#endif
+#ifndef HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION
+#define HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION 1
+struct HEAP_OPTIMIZE_RESOURCES_INFORMATION {
+    DWORD Version;
+    DWORD Flags;
+};
+#endif
+#endif
 
 #ifdef _WIN32
 #include <ws2tcpip.h>
@@ -453,6 +472,38 @@ void vpn_post_quantum_group_set_enabled(bool enabled) {
 
 bool vpn_post_quantum_group_enabled() {
     return g_post_quantum_group_enabled.load(std::memory_order_relaxed);
+}
+
+void heap_try_release_to_os() {
+    // Cap frequency: free-on-empty may fire often under multi-stream drain.
+    static constexpr auto MIN_INTERVAL = std::chrono::seconds(30);
+    static std::mutex mu;
+    static std::chrono::steady_clock::time_point last{};
+    {
+        std::lock_guard lock(mu);
+        const auto now = std::chrono::steady_clock::now();
+        if (last.time_since_epoch().count() != 0 && now - last < MIN_INTERVAL) {
+            return;
+        }
+        last = now;
+    }
+
+#ifdef __GLIBC__
+    malloc_trim(0);
+#elif defined(__MACH__)
+    malloc_zone_pressure_relief(nullptr, 0);
+#elif defined(_WIN32)
+    static const auto heap_set_info = reinterpret_cast<decltype(&HeapSetInformation)>(
+            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "HeapSetInformation"));
+    if (heap_set_info) {
+        HEAP_OPTIMIZE_RESOURCES_INFORMATION heap_opt_info = {};
+        heap_opt_info.Version = HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION;
+        heap_set_info(nullptr, HeapOptimizeResources, &heap_opt_info, sizeof(heap_opt_info));
+    }
+#else
+    // musl and other libcs: no portable purge; large free()'d mmap chunks already return to OS.
+    (void) 0;
+#endif
 }
 
 } // namespace ag

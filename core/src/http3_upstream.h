@@ -105,8 +105,12 @@ private:
     ag::Logger m_log{"H3_UPSTREAM"};
     void *m_ssl_object = nullptr; // A non-owning pointer to the SSL object owned by m_h3_client.
     int m_kex_group_nid = NID_undef;
-    /// Steady-clock ms of last inbound UDP (data-plane). Used to skip HC CONNECT under load.
+    /// Steady-clock ms of last inbound UDP (diagnostics / idle timer). Not used for HC skip.
     std::optional<int64_t> m_last_inbound_steady_ms;
+    /// Last **application** progress (LAN accepted body, ICMP reply, successful HC).
+    /// Health-check busy-skip must use this — raw QUIC UDP alone can stay "alive" while the
+    /// tunnel data path is wedged (CONNECTED + dead ICMP/TCP until process restart).
+    std::optional<int64_t> m_last_app_progress_steady_ms;
     /// Sum of app-side unread buffer sizes (for logging / free-on-empty accounting).
     size_t m_total_unread_bytes = 0;
     /// Connection FC already extended via consume_stream (combined API); see h3_long_lived_bounds.h.
@@ -139,6 +143,12 @@ private:
     void cancel_health_check() override;
     /** hard=true: REQUEST_CANCELLED when starting a new probe; hard=false: NO_ERROR on traffic. */
     void cancel_health_check_impl(bool hard);
+    /**
+     * Record app-level liveness (not raw UDP).
+     * @param soft_cancel_hc  if true, soft-cancel an in-flight HC probe (do not use
+     *                        while handling that probe's own response/close).
+     */
+    void note_app_progress(bool soft_cancel_hc = true);
     [[nodiscard]] VpnConnectionStats get_connection_stats() const override;
     void on_icmp_request(IcmpEchoRequestEvent &event) override;
     void handle_sleep() override;

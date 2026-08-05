@@ -370,6 +370,16 @@ Iterator swap_remove_if(Iterator begin, Iterator end, Predicate p) {
     return begin;
 }
 
+/**
+ * Best-effort: return free heap pages to the OS when the platform allocator supports it.
+ *
+ * Safe while connections are live (only walks free lists / purges unused spans).
+ * Rate-limited internally. On musl (typical OpenWrt static client) this is a no-op —
+ * free() already returns large mmap chunks; small-heap water marks stay until process exit.
+ * Product goal for long-lived H3 is a **stable plateau** after bulk, not cold-start RSS.
+ */
+void heap_try_release_to_os();
+
 extern "C" {
 
 /**
