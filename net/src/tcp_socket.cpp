@@ -713,7 +713,9 @@ static void timer_callback(void *arg, struct timeval now) {
     auto *sock = (TcpSocket *) arg;
 
     if (timercmp(&sock->timeout_ts, &now, <)) {
-        log_sock(sock, dbg, "Timeout event");
+        // Visible at warn: bulk VPN death often surfaces as this ("Operation timed out").
+        log_sock(sock, warn, "Socket idle timeout fired (timeout_ms={}) — raising TCP_SOCKET_EVENT_ERROR",
+                sock->parameters.timeout.count());
         VpnError e = {utils::AG_ETIMEDOUT, evutil_socket_error_to_string(utils::AG_ETIMEDOUT)};
         sock->parameters.handler.handler(sock->parameters.handler.arg, TCP_SOCKET_EVENT_ERROR, &e);
     }
