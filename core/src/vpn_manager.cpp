@@ -120,10 +120,15 @@ vpn_client::EndpointConnectionConfig Vpn::make_client_upstream_config() const {
     }
     if (chosen == VPN_UP_HTTP3) {
         main_protocol.type = VPN_UP_HTTP3;
+        // Reuse http2_connections_num as parallel session count (H2 TCP or H3 QUIC).
+        main_protocol.http3.connections_num = this->upstream_config->http2_connections_num;
+        main_protocol.http3.quic_version = 0;
         if (this->client.quic_connector) {
-            log_vpn(this, info, "Upstream transport: HTTP/3 (QUIC handoff)");
+            log_vpn(this, info, "Upstream transport: HTTP/3 ({} parallel session(s), QUIC handoff)",
+                    main_protocol.http3.connections_num ? main_protocol.http3.connections_num : 1u);
         } else {
-            log_vpn(this, info, "Upstream transport: HTTP/3 (fresh QUIC, no handoff)");
+            log_vpn(this, info, "Upstream transport: HTTP/3 ({} parallel session(s), fresh QUIC)",
+                    main_protocol.http3.connections_num ? main_protocol.http3.connections_num : 1u);
         }
     } else {
         main_protocol.type = VPN_UP_HTTP2;

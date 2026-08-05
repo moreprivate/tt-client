@@ -16,16 +16,16 @@
 #include "common/logger.h"
 #include "http_icmp_multiplexer.h"
 #include "http_udp_multiplexer.h"
+#include "multiplexable_upstream.h"
 #include "net/udp_socket.h"
 #include "vpn/internal/data_buffer.h"
-#include "vpn/internal/server_upstream.h"
 #include "vpn/utils.h"
 
 namespace ag {
 
-class Http3Upstream : public ServerUpstream {
+class Http3Upstream : public MultiplexableUpstream {
 public:
-    Http3Upstream(int id, const VpnUpstreamProtocolConfig &protocol_config);
+    Http3Upstream(const VpnUpstreamProtocolConfig &protocol_config, int id, VpnClient *vpn, ServerHandler handler);
     ~Http3Upstream() override;
 
     Http3Upstream(const Http3Upstream &) = delete;
@@ -70,6 +70,7 @@ private:
         event_loop::AutoTaskId retry_task_id;
         event_loop::AutoTaskId timeout_task_id;
         VpnError error = {};
+        bool need_result = true;
     };
 
     // Context for the deferred processing of the first server datagram saved by the ping during a handoff.
@@ -129,17 +130,14 @@ private:
     std::optional<int64_t> m_idle_timeout_at_ns;
     event_loop::AutoTaskId m_close_on_idle_task_id;
 
-    bool init(VpnClient *vpn, ServerHandler handler) override;
-    void deinit() override;
     bool open_session(std::optional<Millis> timeout) override;
     void close_session() override;
-    uint64_t open_connection(const TunnelAddressPair *addr, int proto, std::string_view app_name) override;
     void close_connection(uint64_t id, bool graceful, bool async) override;
     ssize_t send(uint64_t id, const uint8_t *data, size_t length) override;
     void consume(uint64_t id, size_t length) override;
     size_t available_to_send(uint64_t id) override;
     void update_flow_control(uint64_t id, TcpFlowCtrlInfo info) override;
-    void do_health_check() override;
+    void do_health_check(bool need_result) override;
     void cancel_health_check() override;
     /** hard=true: REQUEST_CANCELLED when starting a new probe; hard=false: NO_ERROR on traffic. */
     void cancel_health_check_impl(bool hard);
@@ -150,10 +148,13 @@ private:
      */
     void note_app_progress(bool soft_cancel_hc = true);
     [[nodiscard]] VpnConnectionStats get_connection_stats() const override;
+    [[nodiscard]] size_t connections_num() const override;
+    bool open_connection(uint64_t id, const TunnelAddressPair *addr, int proto, std::string_view app_name) override;
     void on_icmp_request(IcmpEchoRequestEvent &event) override;
     void handle_sleep() override;
     void handle_wake() override;
     int kex_group_nid() const override;
+    void report_health_check_error(bool need_result, VpnError error);
 
     static void quic_timer_callback(evutil_socket_t, short, void *arg);
     static void socket_handler(void *arg, UdpSocketEvent what, void *data);
