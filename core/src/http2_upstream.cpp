@@ -371,6 +371,7 @@ void Http2Upstream::net_handler(void *arg, TcpSocketEvent what, void *data) {
 
     switch (what) {
     case TCP_SOCKET_EVENT_CONNECTED: {
+        // Idle timeout only for connect/handshake. Bulk download must not be killed by it.
         tcp_socket_set_timeout(upstream->m_socket.get(), Millis{});
 
         if (auto alpn = tcp_socket_get_selected_alpn(upstream->m_socket.get()); alpn != "h2") {
@@ -379,7 +380,7 @@ void Http2Upstream::net_handler(void *arg, TcpSocketEvent what, void *data) {
             break;
         }
 
-        log_upstream(upstream, dbg, "Established TCP connection to endpoint successfully");
+        log_upstream(upstream, info, "Established TCP connection to endpoint successfully (idle timeout disabled)");
         if (upstream->establish_http_session()) {
             tcp_socket_set_read_enabled(upstream->m_socket.get(), true);
             upstream->handler.func(upstream->handler.arg, SERVER_EVENT_SESSION_OPENED, nullptr);
@@ -390,8 +391,12 @@ void Http2Upstream::net_handler(void *arg, TcpSocketEvent what, void *data) {
         break;
     }
     case TCP_SOCKET_EVENT_READABLE: {
-        constexpr size_t READ_BUDGET = 64;
+        // Under 100+ Mbps TLS, 64 peeks/event was too low (left data in kernel → stall/death).
+        constexpr size_t READ_BUDGET = 512;
         TcpSocket *socket = upstream->m_socket.get();
+        // Keep idle timeout off for the life of an established H2 session.
+        tcp_socket_set_timeout(socket, Millis{});
+        size_t bytes_in = 0;
         for (size_t i = 0; i < READ_BUDGET && tcp_socket_is_read_enabled(socket); ++i) {
             tcp_socket::PeekResult result = tcp_socket_peek(socket);
             if (std::holds_alternative<tcp_socket::NoData>(result)) {
@@ -399,7 +404,7 @@ void Http2Upstream::net_handler(void *arg, TcpSocketEvent what, void *data) {
             }
 
             if (std::holds_alternative<tcp_socket::Eof>(result)) {
-                log_upstream(upstream, dbg, "Got EOF from endpoint");
+                log_upstream(upstream, info, "Got EOF from endpoint (after {}B this wakeup)", bytes_in);
                 upstream->close_session_inner(std::nullopt);
                 break;
             }
@@ -415,12 +420,13 @@ void Http2Upstream::net_handler(void *arg, TcpSocketEvent what, void *data) {
                 break;
             }
 
+            bytes_in += size_t(r);
             {
                 using clock = std::chrono::steady_clock;
                 upstream->m_last_inbound_steady_ms =
                         duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
             }
-            // Data proves liveness: soft-cancel active HC only (H2 cancel clears timers).
+            // Soft-cancel HC on real TLS data (bulk download = alive).
             if (upstream->m_health_check_info.has_value()) {
                 upstream->cancel_health_check();
             }
@@ -436,17 +442,31 @@ void Http2Upstream::net_handler(void *arg, TcpSocketEvent what, void *data) {
                 break;
             }
         }
+        if (bytes_in > 0) {
+            log_upstream(upstream, dbg, "H2 readable wakeup consumed {}B (budget={})", bytes_in, READ_BUDGET);
+        }
         break;
     }
     case TCP_SOCKET_EVENT_ERROR: {
         const VpnError *sock_event = (VpnError *) data;
+        int64_t inbound_age_ms = -1;
+        if (upstream->m_last_inbound_steady_ms.has_value()) {
+            using clock = std::chrono::steady_clock;
+            const auto now_ms = duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
+            inbound_age_ms = now_ms - *upstream->m_last_inbound_steady_ms;
+        }
+        const size_t nconn = upstream->m_tcp_connections.size();
 
         if (upstream->m_cert_verify_failed) {
             log_upstream(upstream, warn, "Error on HTTP session socket (certificate verification failed): {} ({})",
                     sock_event->text, sock_event->code);
             upstream->close_session_inner(VpnError{VPN_EC_CERTIFICATE_VERIFICATION_FAILED, sock_event->text});
         } else {
-            log_upstream(upstream, dbg, "Error on HTTP session socket: {} ({})", sock_event->text, sock_event->code);
+            // Always warn: this is what speedtest sees as "socket error" when DL dies at ~100 Mbps.
+            log_upstream(upstream, warn,
+                    "H2 session socket error: {} ({}) last_inbound_age_ms={} app_tcp_conns={} hc_active={}",
+                    sock_event->text, sock_event->code, inbound_age_ms, nconn,
+                    upstream->m_health_check_info.has_value());
             upstream->close_session_inner(VpnError{VPN_EC_ERROR, sock_event->text});
         }
 
