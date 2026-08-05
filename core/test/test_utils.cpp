@@ -25,10 +25,10 @@ TEST(HealthCheckProbeSkip, SkipsWhenRecentAppProgress) {
     EXPECT_EQ(health_check_busy_skip_max_age_ms(0, 0), 1u);
 }
 
-// Long-lived multi-stream: OpenWrt-sized windows; soft unread hints (no drop-on-cap).
+// Long-lived multi-stream: full-size windows for throughput; soft unread hints.
 TEST(QuicLongLivedBounds, WindowsAndUnreadCap) {
-    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 8ull * 1024 * 1024);
-    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 256ull * 1024);
+    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 100ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 1ull * 1024 * 1024);
     EXPECT_EQ(H3_MAX_UNREAD_PER_CONN, size_t(QUIC_STREAM_WINDOW_SIZE));
     EXPECT_EQ(H3_MAX_UNREAD_GLOBAL, size_t(QUIC_CONNECTION_WINDOW_SIZE));
     EXPECT_FALSE(h3_unread_would_exceed_cap(0, 1, H3_MAX_UNREAD_PER_CONN));

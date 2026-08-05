@@ -19,15 +19,15 @@
 // stream traffic is not wedged behind one slow CONNECT (the failure mode that
 // required process restart).
 //
-// Windows: library defaults (OpenWrt-scale). Not a substitute for reclaim —
-// free-on-empty MemoryBuffer still applies after drain.
+// QUIC windows sized for throughput (100+ Mbps), not artificial OpenWrt starvation.
+// Stability = H2-style FC + free-on-empty + app-progress health checks — not tiny windows.
 //
 // RSS product goal for long-lived OpenWrt (musl): **stable plateau** after bulk
 // (no climb/wedge), not matching post-restart cold RSS. musl does not return
 // small-heap pages to the OS; process restart is the only full baseline reset.
 
-static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 8ul * 1024 * 1024;
-static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 256ul * 1024;
+static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 100ul * 1024 * 1024;
+static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 1ul * 1024 * 1024;
 static constexpr uint64_t QUIC_MAX_STREAMS_NUM = 4ul * 1024;
 
 // Soft app-unread hints for tests / logging only (never drop on_body data).
