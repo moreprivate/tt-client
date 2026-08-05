@@ -544,50 +544,55 @@ static bool is_fatal_disconnect_error(int code) {
 
 static std::function<void(VpnStateChangedEvent *)> get_state_changed_callback() {
     return [](VpnStateChangedEvent *event) {
-        note_event("VPN_STATE %s err_code=%d err_text=%s", magic_enum::enum_name(event->state).data(),
-                event->error.code, safe_to_string_view(event->error.text).data());
-        // Snapshot on every non-connected transition so logread has a trail before death.
-        if (event->state != VPN_SS_CONNECTED && event->state != VPN_SS_CONNECTING) {
-            dump_process_diagnostics(magic_enum::enum_name(event->state).data());
-        }
+        // VpnStateChangedEvent is a union: only one arm is valid per state.
+        // Reading event->error on CONNECTED was garbage (connected_info overlay) → SIGSEGV
+        // when formatting err_text (seen as err_code=-2082471592 err_text=(null) then crash).
         switch (event->state) {
-        case VPN_SS_DISCONNECTED:
-            if (event->error.code != 0) {
-                errlog(g_logger, "Error: {} {}", event->error.code, safe_to_string_view(event->error.text));
+        case VPN_SS_DISCONNECTED: {
+            const int code = event->error.code;
+            const char *text = event->error.text;
+            note_event("VPN_STATE DISCONNECTED code=%d text=%s", code, text ? text : "");
+            if (code != 0) {
+                errlog(g_logger, "Error: {} {}", code, safe_to_string_view(text));
             }
+            // Full dump only on disconnect (not every state — caused OpenWrt load spike).
             dump_process_diagnostics("VPN_SS_DISCONNECTED");
-            // OpenWrt daemon: process exit → procd respawn → tun0 ifdown/up → multi-second outage.
-            // Only exit on fatal auth/location/cert failures. Otherwise reconnect in-process.
-            if (is_fatal_disconnect_error(event->error.code)) {
+            if (is_fatal_disconnect_error(code)) {
                 stop_trusttunnel_client("fatal_disconnect");
             } else if (auto client = g_client.lock()) {
                 warnlog(g_logger,
-                        "Non-fatal disconnect (code={}) — in-process reconnect (keep process/tun alive)",
-                        event->error.code);
-                note_event("request_reconnect after non-fatal DISCONNECTED code=%d", event->error.code);
+                        "Non-fatal disconnect (code={}) — in-process reconnect (keep process/tun alive)", code);
+                note_event("request_reconnect after non-fatal DISCONNECTED code=%d", code);
                 client->request_reconnect();
             } else {
                 stop_trusttunnel_client("disconnect_no_client");
             }
             break;
-        case VPN_SS_WAITING_RECOVERY:
-            infolog(g_logger, "Waiting recovery: to next={}ms error={} {}",
-                    event->waiting_recovery_info.time_to_next_ms, event->waiting_recovery_info.error.code,
-                    safe_to_string_view(event->waiting_recovery_info.error.text));
+        }
+        case VPN_SS_WAITING_RECOVERY: {
+            const auto &wr = event->waiting_recovery_info;
+            note_event("VPN_STATE WAITING_RECOVERY next_ms=%u code=%d text=%s", wr.time_to_next_ms,
+                    wr.error.code, wr.error.text ? wr.error.text : "");
+            infolog(g_logger, "Waiting recovery: to next={}ms error={} {}", wr.time_to_next_ms, wr.error.code,
+                    safe_to_string_view(wr.error.text));
             break;
+        }
         case VPN_SS_CONNECTED: {
-            note_event("Successfully connected to endpoint");
-            infolog(g_logger, "Successfully connected to endpoint");
+            const auto &ci = event->connected_info;
+            note_event("VPN_STATE CONNECTED protocol=%s kex=%s", magic_enum::enum_name(ci.protocol).data(),
+                    ci.kex_group ? ci.kex_group : "?");
+            infolog(g_logger, "Successfully connected to endpoint protocol={} kex={}",
+                    magic_enum::enum_name(ci.protocol), ci.kex_group ? ci.kex_group : "?");
             break;
         }
         case VPN_SS_CONNECTING:
-            note_event("VPN_SS_CONNECTING");
+            note_event("VPN_STATE CONNECTING");
             break;
         case VPN_SS_RECOVERING:
-            note_event("VPN_SS_RECOVERING");
+            note_event("VPN_STATE RECOVERING");
             break;
         case VPN_SS_WAITING_FOR_NETWORK:
-            note_event("VPN_SS_WAITING_FOR_NETWORK");
+            note_event("VPN_STATE WAITING_FOR_NETWORK");
             break;
         }
     };
