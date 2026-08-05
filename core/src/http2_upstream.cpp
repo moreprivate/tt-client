@@ -1027,14 +1027,37 @@ int Http2Upstream::kex_group_nid() const {
 }
 
 void Http2Upstream::report_health_check_error(bool need_result, ag::VpnError error) {
-    log_upstream(this, warn, "Health check result: {} ({}) need_result={}", safe_to_string_view(error.text),
-            error.code, need_result);
+    log_upstream(this, warn, "Health check result: {} ({}) need_result={} tcp_conns={}",
+            safe_to_string_view(error.text), error.code, need_result, m_tcp_connections.size());
     if (need_result) {
+        // Connect-time probe: fail the whole endpoint.
         this->handler.func(this->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &error);
-    } else {
-        ServerError err_event = {NON_ID, error};
-        this->handler.func(this->handler.arg, SERVER_EVENT_ERROR, &err_event);
+        return;
     }
+
+    // Periodic probe: do not kill a session that is actively carrying app traffic.
+    // Soft-wedge + CONNECT-probe timeout under bulk used to drop H2 children mid-DL
+    // and cascade into multi collapse / full recovery.
+    {
+        using clock = std::chrono::steady_clock;
+        const auto now_ms = duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
+        const auto max_age_ms = health_check_busy_skip_max_age_ms(
+                this->vpn->upstream_config.health_check_timeout.count(),
+                this->vpn->upstream_config.timeout.count());
+        if (!m_tcp_connections.empty() && m_last_inbound_steady_ms.has_value()
+                && now_ms >= *m_last_inbound_steady_ms
+                && uint64_t(now_ms - *m_last_inbound_steady_ms) <= max_age_ms) {
+            log_upstream(this, warn,
+                    "Periodic HC failed but session has app traffic (conns={}, inbound_age_ms={}) — keeping H2 session",
+                    m_tcp_connections.size(), now_ms - *m_last_inbound_steady_ms);
+            return;
+        }
+    }
+
+    // Idle/dead child: close this H2 session only; mux keeps siblings and may replenish.
+    log_upstream(this, warn, "Periodic HC failed — closing this H2 upstream only (mux may keep others)");
+    ServerError err_event = {NON_ID, error};
+    this->handler.func(this->handler.arg, SERVER_EVENT_ERROR, &err_event);
 }
 
 } // namespace ag

@@ -305,6 +305,12 @@ static std::function<void(VpnVerifyCertificateEvent *)> get_verify_certificate_c
     };
 }
 
+static bool is_fatal_disconnect_error(int code) {
+    // Mirror core is_fatal_error_code: only these should kill the daemon process.
+    return code == VPN_EC_AUTH_REQUIRED || code == VPN_EC_LOCATION_UNAVAILABLE
+            || code == VPN_EC_CERTIFICATE_VERIFICATION_FAILED;
+}
+
 static std::function<void(VpnStateChangedEvent *)> get_state_changed_callback() {
     return [](VpnStateChangedEvent *event) {
         switch (event->state) {
@@ -312,7 +318,19 @@ static std::function<void(VpnStateChangedEvent *)> get_state_changed_callback() 
             if (event->error.code != 0) {
                 errlog(g_logger, "Error: {} {}", event->error.code, safe_to_string_view(event->error.text));
             }
-            stop_trusttunnel_client();
+            // OpenWrt daemon: process exit → procd respawn → tun0 ifdown/up → multi-second outage.
+            // Only exit on fatal auth/location/cert failures. Otherwise reconnect in-process.
+            if (is_fatal_disconnect_error(event->error.code)) {
+                errlog(g_logger, "Fatal disconnect — stopping client process");
+                stop_trusttunnel_client();
+            } else if (auto client = g_client.lock()) {
+                warnlog(g_logger,
+                        "Non-fatal disconnect (code={}) — in-process reconnect (keep process/tun alive)",
+                        event->error.code);
+                client->request_reconnect();
+            } else {
+                stop_trusttunnel_client();
+            }
             break;
         case VPN_SS_WAITING_RECOVERY:
             infolog(g_logger, "Waiting recovery: to next={}ms error={} {}",

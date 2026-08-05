@@ -61,6 +61,12 @@ int TrustTunnelClient::disconnect() {
     return 0;
 }
 
+void TrustTunnelClient::request_reconnect() {
+    if (Vpn *vpn = m_vpn.load()) {
+        vpn_force_reconnect(vpn);
+    }
+}
+
 void TrustTunnelClient::notify_network_change(VpnNetworkState state) {
     if (m_vpn) {
         vpn_notify_network_change(m_vpn, state);
@@ -300,6 +306,11 @@ Error<TrustTunnelClient::ConnectResultError> TrustTunnelClient::connect_to_serve
                                             .attempts = UINT32_MAX,
                                     },
                             .anti_dpi = m_config.location.anti_dpi,
+                    },
+            // Prefer recovery over "N connect attempts then DISCONNECTED" for long-lived daemons.
+            .retry_info =
+                    {
+                            .policy = VPN_CRP_FALL_INTO_RECOVERY,
                     },
     };
 

@@ -666,8 +666,11 @@ WIN_EXPORT Vpn *vpn_open(const VpnSettings *settings);
 WIN_EXPORT ag::VpnError vpn_connect(Vpn *vpn, const VpnConnectParameters *parameters);
 
 /**
- * Forcibly initiate the next session recovery attempt. Do nothing if the VPN client is not between
- * recovery attempts (e.g., not in `VPN_SS_WAITING_RECOVERY` state).
+ * Forcibly reconnect or advance recovery.
+ * - `VPN_SS_DISCONNECTED`: start a new connect (`CE_DO_CONNECT`) without process restart.
+ * - `VPN_SS_WAITING_RECOVERY`: fire the next recovery attempt immediately.
+ * - connected/recovering/connecting: tear down session into recovery.
+ * Intended for long-lived daemons (OpenWrt procd) so tun0 is not recycled on soft death.
  * @param vpn VPN client
  */
 WIN_EXPORT void vpn_force_reconnect(Vpn *vpn);

@@ -1,6 +1,7 @@
 #include "upstream_multiplexer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <numeric>
 
@@ -197,18 +198,27 @@ void UpstreamMultiplexer::update_flow_control(uint64_t id, TcpFlowCtrlInfo info)
 void UpstreamMultiplexer::do_health_check() {
     cancel_health_check();
 
-    UpstreamInfo *info = nullptr;
+    // Soft-check every open child. Historical bug: the first open upstream used
+    // need_result=true on *every* HC (including periodic). Under multi-H2 bulk DL that
+    // turned a single busy-session CONNECT probe timeout into SERVER_EVENT_HEALTH_CHECK_ERROR
+    // → full VPN disconnect → process/tun recycle (speedtest death after ~200 Mbps peaks).
+    // Connect-time with a single child still escalates correctly: soft fail closes the only
+    // child → empty pool → SERVER_EVENT_ERROR to the parent.
+    size_t started = 0;
     for (auto &[id, i] : m_upstreams_pool) {
         if (i->state == US_SESSION_OPENED) {
-            i->upstream->do_health_check(/*need_result=*/(info == nullptr));
-            info = i.get();
+            i->upstream->do_health_check(/*need_result=*/false);
+            ++started;
         }
     }
 
-    if (info == nullptr) {
+    if (started == 0) {
         log_mux(this, warn, "No health check has been started: there are no open sessions");
+        VpnError e = {VPN_EC_ERROR, "No open H2 sessions for health check"};
+        this->handler.func(this->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &e);
         return;
     }
+    log_mux(this, dbg, "Soft health check started on {} open upstream(s)", started);
 }
 
 void UpstreamMultiplexer::cancel_health_check() {
@@ -253,7 +263,7 @@ void UpstreamMultiplexer::on_icmp_request(IcmpEchoRequestEvent &event) {
     event.result = -1;
 }
 
-void UpstreamMultiplexer::close_upstream(int upstream_id) {
+void UpstreamMultiplexer::close_upstream(int upstream_id, bool replenish) {
     log_ups(this, upstream_id, dbg, "...");
 
     auto it = m_upstreams_pool.find(upstream_id);
@@ -265,13 +275,26 @@ void UpstreamMultiplexer::close_upstream(int upstream_id) {
 
     m_upstreams_pool.erase(it);
 
-    log_mux(this, dbg, "Remaining upstreams={}, connections={}, pending connections={}", m_upstreams_pool.size(),
-            m_connections.size(), m_pending_connections.size());
+    log_mux(this, info, "Closed child upstream id={}; remaining upstreams={}, connections={}, pending={}",
+            upstream_id, m_upstreams_pool.size(), m_connections.size(), m_pending_connections.size());
     if (!m_upstreams_pool.empty()) {
+        // Keep multi-H2 capacity on soft single-child death. Never replenish while tearing
+        // down the whole pool (fatal error path passes replenish=false).
+        if (replenish && m_session_open && m_upstreams_pool.size() < m_max_upstreams_num) {
+            // Always allocate a fresh id (do not reuse select_upstream_for_connection —
+            // it prefers existing underloaded children and would skip replenish).
+            static std::atomic<int> next_replenish_id{1'000'000};
+            const int new_id = next_replenish_id.fetch_add(1, std::memory_order_relaxed);
+            log_mux(this, info, "Replenishing H2 pool: opening replacement upstream id={} (pool {}/{})",
+                    new_id, m_upstreams_pool.size() + 1, m_max_upstreams_num);
+            if (!open_new_upstream(new_id, std::nullopt)) {
+                log_mux(this, warn, "Failed to open replacement upstream id={}", new_id);
+            }
+        }
         return;
     }
 
-    log_mux(this, dbg, "All child upstreams are closed");
+    log_mux(this, warn, "All child upstreams are closed — escalating to parent session end");
     m_session_open = false;
     if (m_pending_error.has_value()) {
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
@@ -368,13 +391,13 @@ void UpstreamMultiplexer::child_upstream_handler(void *arg, ServerEvent what, vo
                 const auto it = mux->m_upstreams_pool.begin();
                 it->second->upstream->close_session();
                 auto upstream_id = it->first;
-                mux->close_upstream(upstream_id);
+                mux->close_upstream(upstream_id, /*replenish=*/false);
             }
         } else {
             log_mux(mux, info, "Error on upstream id={} is non-fatal, closing upstream: ({}) {}", ctx->id,
                     event->error.code, event->error.text);
             pool_it->second->upstream->close_session();
-            mux->close_upstream(ctx->id);
+            mux->close_upstream(ctx->id, /*replenish=*/true);
         }
         break;
     }
