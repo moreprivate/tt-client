@@ -64,12 +64,16 @@
 
 #define MAX_SUPPORTED_MTU 9000
 
-#define TCP_WND (256 * 1024)
-#define TCP_RCV_SCALE 4
+// Receive/send windows for LAN TCP through the tunnel. 256 KiB was far too small
+// for ~50 ms RTT + 100+ Mbps VPN (BDP ≈ rate×RTT): multi-DL spiked then stalled
+// ~6–8 Mbps avg while UL stayed ~80 Mbps. 1 MiB supports ~160 Mbps at 50 ms RTT
+// per flow before window-limiting.
+#define TCP_WND (1024 * 1024)
+#define TCP_RCV_SCALE 5
 #define TCP_MSS (MAX_SUPPORTED_MTU - IP_HLEN - TCP_HLEN)
 
-#define TCP_SND_BUF (256 * 1024)
-#define TCP_SND_QUEUELEN 256
+#define TCP_SND_BUF (1024 * 1024)
+#define TCP_SND_QUEUELEN 512
 // Explicit SNDLOWAT to avoid LWIP sanity check u16 overflow with large TCP_SND_BUF
 #define TCP_SNDLOWAT (2 * TCP_MSS + 1)
 

@@ -23,7 +23,8 @@ using namespace std::chrono;
 
 namespace ag {
 
-static constexpr size_t HTTP2_STREAM_INITIAL_WINDOW_SIZE = 131072; // Chrome constant
+// Match high-BDP LAN paths (was 128 KiB Chrome default — too small for VPN multi-DL).
+static constexpr size_t HTTP2_STREAM_INITIAL_WINDOW_SIZE = 1024 * 1024;
 
 enum Http2Upstream::TcpConnection::Flag : int {
     TCF_READ_ENABLED,  // `SERVER_EVENT_READ` can be raised
