@@ -16,10 +16,13 @@
 #include <WinSock2.h>
 #endif // _WIN32
 
+#include "common/logger.h"
 #include "net/network_manager.h"
 #include "vpn/trusttunnel/auto_network_monitor.h"
 
 namespace ag {
+
+static const Logger g_netmon_log("AUTO_NETMON");
 
 AutoNetworkMonitor::AutoNetworkMonitor(TrustTunnelClient *client, std::string bound_if)
         : m_client(client)
@@ -30,7 +33,15 @@ AutoNetworkMonitor::~AutoNetworkMonitor() {
     stop();
 }
 
+static bool is_tunnel_iface(std::string_view if_name) {
+    // Self-created VPN device: never treat as uplink path change.
+    return if_name.size() >= 3 && if_name.compare(0, 3, "tun") == 0;
+}
+
 static bool update_interface(std::string_view if_name) {
+    if (is_tunnel_iface(if_name)) {
+        return false;
+    }
     uint32_t if_index = if_nametoindex(if_name.data());
     if (if_index != 0) {
         vpn_network_manager_set_outbound_interface(if_index);
@@ -55,9 +66,26 @@ bool AutoNetworkMonitor::start() {
 
     m_network_monitor = ag::utils::create_network_monitor(
             [this, is_bound_if_override](const std::string &if_name, bool is_connected) {
+                // tun0 up/down is our own tunnel — notifying would self-trigger recovery
+                // during CONNECTING (OpenWrt: Waiting recovery error=0 right after tun_open).
+                if (is_tunnel_iface(if_name)) {
+                    dbglog(g_netmon_log, "ignore tunnel iface change: {} connected={}", if_name, is_connected);
+                    return;
+                }
+
+                // Debounce: same uplink still CONNECTED is not a path change.
+                // (Routing/SQM/firewall noise after tun0 ifup used to re-fire WAN CONNECTED.)
+                if (is_connected && m_last_connected && if_name == m_last_if_name) {
+                    dbglog(g_netmon_log, "ignore redundant CONNECTED on {}", if_name);
+                    return;
+                }
+
                 if (!is_bound_if_override) {
                     update_interface(if_name);
                 }
+                m_last_if_name = if_name;
+                m_last_connected = is_connected;
+                infolog(g_netmon_log, "network change: if={} connected={}", if_name, is_connected);
                 m_client->notify_network_change(is_connected ? ag::VPN_NS_CONNECTED : ag::VPN_NS_NOT_CONNECTED);
             });
 
@@ -69,7 +97,11 @@ bool AutoNetworkMonitor::start() {
         m_network_monitor->start(vpn_event_loop_get_base(m_network_monitor_loop.get()));
         if (!is_bound_if_override) {
             auto if_name = m_network_monitor->get_default_interface();
-            update_interface(if_name);
+            if (!is_tunnel_iface(if_name)) {
+                update_interface(if_name);
+                m_last_if_name = if_name;
+                m_last_connected = true;
+            }
         }
     });
 

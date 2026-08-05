@@ -1,6 +1,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <csignal>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -8,6 +9,10 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include <cxxopts.hpp>
 #include <magic_enum/magic_enum.hpp>
@@ -88,12 +93,44 @@ static void sighandler(int sig) {
     }
 }
 
+#ifndef _WIN32
+// Async-signal-safe breadcrumb for silent OpenWrt process death (no app logs before ifdown).
+static void fatal_signal_handler(int sig) {
+    const char *name = "SIGNAL";
+    if (sig == SIGSEGV) {
+        name = "SIGSEGV";
+    } else if (sig == SIGABRT) {
+        name = "SIGABRT";
+    } else if (sig == SIGBUS) {
+        name = "SIGBUS";
+    } else if (sig == SIGFPE) {
+        name = "SIGFPE";
+    } else if (sig == SIGILL) {
+        name = "SIGILL";
+    }
+    // write(2) only — logger is not async-signal-safe.
+    const char prefix[] = "trusttunnel_client: fatal ";
+    const char suffix[] = " — process aborting (procd will respawn)\n";
+    (void) write(STDERR_FILENO, prefix, sizeof(prefix) - 1);
+    (void) write(STDERR_FILENO, name, strlen(name));
+    (void) write(STDERR_FILENO, suffix, sizeof(suffix) - 1);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+#endif
+
 static void setup_sighandler() {
 #ifdef _WIN32
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
 #else
     signal(SIGPIPE, SIG_IGN);
+    // Leave a journal breadcrumb on hard crash (previously: silent ifdown + new PID only).
+    signal(SIGSEGV, fatal_signal_handler);
+    signal(SIGABRT, fatal_signal_handler);
+    signal(SIGBUS, fatal_signal_handler);
+    signal(SIGFPE, fatal_signal_handler);
+    signal(SIGILL, fatal_signal_handler);
     // Block SIGINT and SIGTERM - they will be waited using sigwait().
     sigset_t sigset; // NOLINT(cppcoreguidelines-init-variables)
     sigemptyset(&sigset);
