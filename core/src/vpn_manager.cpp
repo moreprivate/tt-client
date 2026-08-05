@@ -196,9 +196,13 @@ bool Vpn::run_event_loop() {
 #endif // __APPLE__ && TARGET_OS_IPHONE
                 });
         if (ret != 0) {
-            log_vpn(this, err, "Event loop run returned {}, shutting down", ret);
+            log_vpn(this, err, "Event loop run returned {}, shutting down (fsm_state={})", ret,
+                    magic_enum::enum_name((VpnSessionState) this->fsm.get_state()));
             this->pending_error = {.code = VPN_EC_EVENT_LOOP_FAILURE, .text = "Event loop run error"};
             shutdown_cb(this);
+        } else {
+            log_vpn(this, warn, "Event loop exited cleanly (ret=0) fsm_state={}",
+                    magic_enum::enum_name((VpnSessionState) this->fsm.get_state()));
         }
     });
 
@@ -610,7 +614,9 @@ void vpn_reset_connections(Vpn *vpn, int uid) {
 }
 
 void vpn_notify_network_change(Vpn *vpn, VpnNetworkState state) {
-    log_vpn(vpn, info, "state={}", magic_enum::enum_name(state));
+    log_vpn(vpn, warn, "network_change notify: state={} fsm_state={} client_state={} outbound_if={}",
+            magic_enum::enum_name(state), magic_enum::enum_name((VpnSessionState) vpn->fsm.get_state()),
+            (int) vpn->client_state, vpn_network_manager_get_outbound_interface());
 
     std::unique_lock l(vpn->stop_guard);
 
@@ -620,9 +626,13 @@ void vpn_notify_network_change(Vpn *vpn, VpnNetworkState state) {
     }
 
     vpn->submit([vpn, state] {
+        log_vpn(vpn, warn, "network_change apply: state={} fsm_before={}", magic_enum::enum_name(state),
+                magic_enum::enum_name((VpnSessionState) vpn->fsm.get_state()));
         vpn->client.on_network_change();
         vpn->network_changed_before_recovery = true;
         vpn->fsm.perform_transition(vpn_fsm::CE_NETWORK_CHANGE, (void *) &state);
+        log_vpn(vpn, warn, "network_change done: fsm_after={}",
+                magic_enum::enum_name((VpnSessionState) vpn->fsm.get_state()));
     });
 
     log_vpn(vpn, info, "Done");

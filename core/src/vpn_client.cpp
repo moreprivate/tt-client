@@ -160,26 +160,32 @@ static void vpn_upstream_handler(void *arg, ServerEvent what, void *data) {
     }
     case SERVER_EVENT_SESSION_CLOSED: {
         // INFO: session death is the primary signal for "LAN blackhole" failures; must not be dbg-only.
-        log_client(vpn, info, "Server session closed (upstream session ended; client will disconnect/recover)");
+        log_client(vpn, warn,
+                "Server session closed (upstream session ended; client will disconnect/recover) client_fsm={}",
+                magic_enum::enum_name(vpn_client::State(vpn->fsm.get_state())));
         vpn->fsm.perform_transition(vpn_client::E_SESSION_CLOSED, nullptr);
         break;
     }
     case SERVER_EVENT_HEALTH_CHECK_ERROR: {
         const VpnError *error = (VpnError *) data;
         assert(error);
-        log_client(vpn, info, "Health check error: {} ({}) — triggering disconnect for recovery",
-                safe_to_string_view(error->text), error->code);
+        log_client(vpn, warn, "Health check error: {} ({}) — triggering disconnect for recovery client_fsm={}",
+                safe_to_string_view(error->text), error->code,
+                magic_enum::enum_name(vpn_client::State(vpn->fsm.get_state())));
         vpn->fsm.perform_transition(vpn_client::E_HEALTH_CHECK_ERROR, data);
         break;
     }
     case SERVER_EVENT_ERROR: {
         const ServerError *event = (ServerError *) data;
         if (event->id != NON_ID) {
+            log_client(vpn, warn, "Server connection error id={} {} ({})", event->id,
+                    safe_to_string_view(event->error.text), event->error.code);
             break;
         }
 
-        log_client(vpn, info, "Server session terminated with error: {} ({})",
-                safe_to_string_view(event->error.text), event->error.code);
+        log_client(vpn, warn, "Server session terminated with error: {} ({}) client_fsm={}",
+                safe_to_string_view(event->error.text), event->error.code,
+                magic_enum::enum_name(vpn_client::State(vpn->fsm.get_state())));
         vpn->fsm.perform_transition(vpn_client::E_SESSION_ERROR, (void *) &event->error);
         break;
     }
