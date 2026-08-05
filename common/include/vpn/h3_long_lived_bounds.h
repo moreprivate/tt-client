@@ -21,6 +21,10 @@
 //
 // Windows: library defaults (OpenWrt-scale). Not a substitute for reclaim —
 // free-on-empty MemoryBuffer still applies after drain.
+//
+// RSS product goal for long-lived OpenWrt (musl): **stable plateau** after bulk
+// (no climb/wedge), not matching post-restart cold RSS. musl does not return
+// small-heap pages to the OS; process restart is the only full baseline reset.
 
 static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 8ul * 1024 * 1024;
 static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 256ul * 1024;

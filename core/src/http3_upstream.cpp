@@ -304,6 +304,7 @@ void Http3Upstream::close_session() {
     m_idle_timeout_at_ns.reset();
     m_close_on_idle_task_id.reset();
     m_last_inbound_steady_ms.reset();
+    m_last_app_progress_steady_ms.reset();
     m_total_unread_bytes = 0;
     m_conn_fc_surplus = 0;
     m_state = H3US_IDLE;
@@ -407,6 +408,7 @@ void Http3Upstream::consume(uint64_t id, size_t length) {
         return;
     }
     credit_stream_fc(it->second.stream_id, length);
+    note_app_progress();
     // Emit MAX_STREAM_DATA / MAX_DATA; safe outside the packet input handler.
     if (!m_in_handler) {
         m_h3_client->flush();
@@ -493,22 +495,23 @@ void Http3Upstream::do_health_check() {
         return;
     }
 
-    // Under bulk multi-stream download, opening CONNECT then cancelling on first inbound
-    // races server H3 write/FIN. If inbound is fresher than the HC budget, session is alive.
+    // Skip CONNECT probe only if **app** path made progress recently (LAN RX / ICMP /
+    // successful probe). Raw QUIC UDP alone is not enough: keepalives can keep a dead
+    // data path looking "busy" and postpone recovery forever (overnight CONNECTED wedge).
     {
         using clock = std::chrono::steady_clock;
         const auto now_ms =
                 duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
         std::optional<uint64_t> age_ms;
-        if (m_last_inbound_steady_ms.has_value() && now_ms >= *m_last_inbound_steady_ms) {
-            age_ms = uint64_t(now_ms - *m_last_inbound_steady_ms);
+        if (m_last_app_progress_steady_ms.has_value() && now_ms >= *m_last_app_progress_steady_ms) {
+            age_ms = uint64_t(now_ms - *m_last_app_progress_steady_ms);
         }
         const auto max_age_ms = health_check_busy_skip_max_age_ms(
                 this->vpn->upstream_config.health_check_timeout.count(),
                 this->vpn->upstream_config.timeout.count());
         if (should_skip_health_check_probe(age_ms, max_age_ms)) {
             log_upstream(this, dbg,
-                    "Health check: skipped (inbound {}ms ago < busy window {}ms)",
+                    "Health check: skipped (app progress {}ms ago < busy window {}ms)",
                     age_ms.value_or(0), max_age_ms);
             return;
         }
@@ -571,17 +574,27 @@ void Http3Upstream::do_health_check() {
 }
 
 void Http3Upstream::cancel_health_check() {
-    // Default: soft cancel (traffic = healthy). Hard cancel used when starting a new probe.
+    // Soft cancel when app traffic proved liveness (see note_app_progress).
     cancel_health_check_impl(/*hard=*/false);
 }
 
 void Http3Upstream::cancel_health_check_impl(bool hard) {
     if (m_health_check_info.has_value() && m_health_check_info->stream_id.has_value()) {
-        // Soft: H3_NO_ERROR (peer traffic already proved liveness; avoid CANCELled storm).
+        // Soft: H3_NO_ERROR (app progress already proved liveness; avoid CANCELled storm).
         // Hard: REQUEST_CANCELLED when replacing/aborting a probe deliberately.
         close_stream(*m_health_check_info->stream_id, hard ? H3_REQUEST_CANCELLED : H3_NO_ERROR);
     }
     m_health_check_info.reset();
+}
+
+void Http3Upstream::note_app_progress(bool soft_cancel_hc) {
+    using clock = std::chrono::steady_clock;
+    m_last_app_progress_steady_ms =
+            duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
+    // Soft-cancel in-flight probe only when a different app path proved liveness.
+    if (soft_cancel_hc && m_health_check_info.has_value()) {
+        cancel_health_check_impl(/*hard=*/false);
+    }
 }
 
 VpnConnectionStats Http3Upstream::get_connection_stats() const {
@@ -644,10 +657,8 @@ void Http3Upstream::socket_handler(void *arg, UdpSocketEvent what, void *data) {
                 upstream->m_last_inbound_steady_ms =
                         duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
             }
-            // Inbound proves session alive: soft-cancel active probe only (no hard CANCEL storm).
-            if (upstream->m_health_check_info.has_value()) {
-                upstream->cancel_health_check();
-            }
+            // Do **not** soft-cancel HC or mark app-healthy on raw UDP: keepalives/ACKs can
+            // arrive while CONNECT/ICMP streams are dead (silent wedge until process restart).
             if (auto err = upstream->m_h3_client->input(path, {buf, (size_t) r}); err != nullptr) {
                 // e.g. ERR_FINAL_SIZE / ERR_CLOSING under load: connection is dead.
                 // Must NOT leave H3US_ESTABLISHED until health-check times out (~7–30s blackhole).
@@ -779,12 +790,14 @@ void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
     if (self->m_udp_mux.get_stream_id() == stream_id) {
         self->m_udp_mux.process_read_event(chunk);
         self->m_h3_client->consume_stream(stream_id, chunk.size());
+        self->note_app_progress();
         return;
     }
 
     if (self->m_icmp_mux.get_stream_id() == stream_id) {
         self->m_icmp_mux.process_read_event(chunk);
         self->m_h3_client->consume_stream(stream_id, chunk.size());
+        self->note_app_progress();
         return;
     }
 
@@ -1012,6 +1025,9 @@ void Http3Upstream::handle_response(uint64_t stream_id, const HttpHeaders *heade
         // NOLINTBEGIN(bugprone-unchecked-optional-access)
         if (headers->status_code != HTTP_OK_STATUS) {
             m_health_check_info->error = {VPN_EC_ERROR, "Bad response code"};
+        } else {
+            // Successful CONNECT probe = real app-level liveness (do not cancel self).
+            note_app_progress(/*soft_cancel_hc=*/false);
         }
         m_health_check_info->timeout_task_id.reset();
         // NOLINTEND(bugprone-unchecked-optional-access)
@@ -1266,6 +1282,11 @@ int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) 
     // Release empty buffer so long-lived sessions reclaim app heap after bulk.
     if (pending->size() == 0) {
         conn->unread_data.reset();
+        // Opportunistic platform heap purge when no app unread remains (rate-limited;
+        // no-op on musl). Keeps plateau honest without process restart.
+        if (m_total_unread_bytes == 0) {
+            heap_try_release_to_os();
+        }
     }
 
     return 0;
@@ -1274,6 +1295,9 @@ int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) 
 int Http3Upstream::raise_read_event(uint64_t conn_id, U8View data) {
     ServerReadEvent serv_event = {conn_id, data.data(), data.size(), 0};
     this->handler.func(this->handler.arg, SERVER_EVENT_READ, &serv_event);
+    if (serv_event.result > 0) {
+        note_app_progress();
+    }
     return serv_event.result;
 }
 
