@@ -378,7 +378,14 @@ static std::unique_ptr<ServerUpstream> make_upstream(const VpnUpstreamProtocolCo
         break;
     case VPN_UP_HTTP3:
 #ifndef DISABLE_HTTP3
-        upstream = std::make_unique<Http3Upstream>(VpnClient::next_upstream_id(), protocol);
+        // Multi QUIC sessions — same UpstreamMultiplexer as H2 multi. Single-session H3
+        // multi-stream was not enough for multi-DL parity on high-BDP OpenWrt paths.
+        upstream = std::make_unique<UpstreamMultiplexer>(VpnClient::next_upstream_id(), protocol,
+                protocol.http3.connections_num,
+                [](const VpnUpstreamProtocolConfig &protocol_config, int id, VpnClient *vpn,
+                        ServerHandler handler) -> std::unique_ptr<MultiplexableUpstream> {
+                    return std::make_unique<Http3Upstream>(protocol_config, id, vpn, handler);
+                });
 #endif
         break;
     case VPN_UP_AUTO:

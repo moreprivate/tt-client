@@ -163,6 +163,12 @@ typedef struct {
 typedef struct {
     /** QUIC protocol version. If 0, default version will be used */
     uint32_t quic_version;
+    /**
+     * Number of parallel HTTP/3 (QUIC) sessions. If 0, default value will be assigned
+     * (same default as HTTP/2 multi via UpstreamMultiplexer). Multiple sessions give
+     * independent congestion windows — required for multi-DL parity with H2 multi-5.
+     */
+    uint32_t connections_num;
 } VpnHttp3UpstreamConfig;
 
 typedef struct {
@@ -226,8 +232,9 @@ typedef struct {
      */
     VpnUpstreamProtocol main_protocol;
     /**
-     * Number of parallel HTTP/2 sessions. If 0, the default value will be used.
-     * Ignored when `main_protocol` is not `VPN_UP_HTTP2`.
+     * Number of parallel upstream sessions (HTTP/2 or HTTP/3). If 0, the default value will be used.
+     * Applies to whichever `main_protocol` is selected (H2 multi TCP sessions or H3 multi QUIC).
+     * Config key remains `http2_connections_num` for backward compatibility.
      */
     uint32_t http2_connections_num;
     /**

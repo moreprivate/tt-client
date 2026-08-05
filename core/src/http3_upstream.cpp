@@ -61,10 +61,12 @@ bool Http3Upstream::TcpConnection::has_unread_data() const {
     return this->unread_data != nullptr && this->unread_data->size() > 0;
 }
 
-Http3Upstream::Http3Upstream(int id, const VpnUpstreamProtocolConfig &protocol_config)
-        : ServerUpstream(id, protocol_config)
+Http3Upstream::Http3Upstream(
+        const VpnUpstreamProtocolConfig &protocol_config, int id, VpnClient *vpn, ServerHandler handler)
+        : MultiplexableUpstream(protocol_config, id, vpn, handler)
         , m_udp_mux({this, mux_send_connect_request_callback, mux_send_data_callback, mux_consume_callback})
-        , m_icmp_mux({this, mux_send_connect_request_callback, mux_send_data_callback, mux_consume_callback}) {
+        , m_icmp_mux({this, mux_send_connect_request_callback, mux_send_data_callback, mux_consume_callback})
+        , m_credentials(make_credentials(vpn->upstream_config.username, vpn->upstream_config.password)) {
 #if 0
     quiche_enable_debug_logging(
             [] (const char *line, void *) {
@@ -76,21 +78,6 @@ Http3Upstream::Http3Upstream(int id, const VpnUpstreamProtocolConfig &protocol_c
 }
 
 Http3Upstream::~Http3Upstream() = default;
-
-bool Http3Upstream::init(VpnClient *vpn, ServerHandler handler) {
-    if (!this->ServerUpstream::init(vpn, handler)) {
-        log_upstream(this, err, "Failed to initialize base upstream");
-        deinit();
-        return false;
-    }
-
-    m_credentials = make_credentials(vpn->upstream_config.username, vpn->upstream_config.password);
-
-    return true;
-}
-
-void Http3Upstream::deinit() {
-}
 
 bool Http3Upstream::open_session(std::optional<Millis>) {
     if (m_state != H3US_IDLE) {
@@ -313,16 +300,16 @@ void Http3Upstream::close_session() {
     log_upstream(this, info, "HTTP/3 session closed (socket and streams released)");
 }
 
-uint64_t Http3Upstream::open_connection(const TunnelAddressPair *addr, int proto, std::string_view app_name) {
+bool Http3Upstream::open_connection(
+        uint64_t conn_id, const TunnelAddressPair *addr, int proto, std::string_view app_name) {
     if (m_state != H3US_ESTABLISHED) {
         log_upstream(this, err, "Invalid upstream state: {}", magic_enum::enum_name(m_state));
         assert(0);
         return false;
     }
 
-    uint64_t conn_id = this->vpn->upstream_conn_id_generator.get();
     if (proto == IPPROTO_UDP) {
-        return m_udp_mux.open_connection(conn_id, addr, app_name) ? conn_id : NON_ID;
+        return m_udp_mux.open_connection(conn_id, addr, app_name);
     }
 
     auto [stream_id, is_retriable] = this->send_connect_request(&addr->dst, app_name);
@@ -330,16 +317,20 @@ uint64_t Http3Upstream::open_connection(const TunnelAddressPair *addr, int proto
         TcpConnection *conn = &m_tcp_connections[conn_id];
         conn->stream_id = stream_id.value();
         m_tcp_conn_by_stream_id[stream_id.value()] = conn_id;
-        return conn_id;
+        return true;
     }
 
     if (is_retriable) {
         log_conn(this, conn_id, dbg, "Couldn't send connect request immediately but still can try later");
         m_retriable_tcp_requests[conn_id] = {addr->dst, std::string(app_name)};
-        return conn_id;
+        return true;
     }
 
-    return NON_ID;
+    return false;
+}
+
+size_t Http3Upstream::connections_num() const {
+    return m_tcp_connections.size() + m_udp_mux.connections_num();
 }
 
 void Http3Upstream::close_connection(uint64_t conn_id, bool graceful, bool async) {
@@ -466,7 +457,7 @@ void Http3Upstream::update_flow_control(uint64_t id, TcpFlowCtrlInfo info) {
     }
 }
 
-void Http3Upstream::do_health_check() {
+void Http3Upstream::do_health_check(bool need_result) {
     // Drop any previous probe (hard cancel) before starting a new one — unless busy.
     cancel_health_check_impl(/*hard=*/true);
 
@@ -485,12 +476,16 @@ void Http3Upstream::do_health_check() {
                                         self->close_stream(
                                                 *self->m_health_check_info->stream_id, H3_REQUEST_CANCELLED);
                                     }
+                                    bool nr = self->m_health_check_info.has_value()
+                                            ? self->m_health_check_info->need_result
+                                            : true;
                                     self->m_health_check_info.reset();
                                     VpnError e = {VPN_EC_ERROR, "No HTTP3 session"};
-                                    self->handler.func(self->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &e);
+                                    self->report_health_check_error(nr, e);
                                 },
                         },
                         {}),
+                .need_result = need_result,
         };
         return;
     }
@@ -511,13 +506,13 @@ void Http3Upstream::do_health_check() {
                 this->vpn->upstream_config.timeout.count());
         if (should_skip_health_check_probe(age_ms, max_age_ms)) {
             log_upstream(this, dbg,
-                    "Health check: skipped (app progress {}ms ago < busy window {}ms)",
-                    age_ms.value_or(0), max_age_ms);
+                    "Health check: skipped (app progress {}ms ago < busy window {}ms; need_result={})",
+                    age_ms.value_or(0), max_age_ms, need_result);
             return;
         }
     }
 
-    log_upstream(this, info, "Health check: starting CONNECT probe (timeout={}ms)",
+    log_upstream(this, info, "Health check: starting CONNECT probe (need_result={} timeout={}ms)", need_result,
             this->vpn->upstream_config.health_check_timeout.count());
     auto [stream_id, is_retriable] = this->send_connect_request(&HEALTH_CHECK_HOST, "");
     if (stream_id.has_value()) {
@@ -529,27 +524,34 @@ void Http3Upstream::do_health_check() {
                                 [](void *arg, TaskId) {
                                     auto *self = (Http3Upstream *) arg;
                                     log_upstream(self, warn, "Health check: timed out");
+                                    bool nr = self->m_health_check_info.has_value()
+                                            ? self->m_health_check_info->need_result
+                                            : true;
                                     self->close_stream(*self->m_health_check_info->stream_id, H3_REQUEST_CANCELLED);
                                     self->m_health_check_info.reset();
                                     VpnError e = {VPN_EC_ERROR, "Health check has timed out"};
-                                    self->handler.func(self->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &e);
+                                    self->report_health_check_error(nr, e);
                                 },
                         },
                         this->vpn->upstream_config.health_check_timeout),
+                .need_result = need_result,
         };
         return;
     }
 
     if (is_retriable) {
         log_upstream(this, info, "Health check: send retriable, will retry");
-        HealthCheckInfo &info = m_health_check_info.emplace(HealthCheckInfo{});
+        HealthCheckInfo &info = m_health_check_info.emplace(HealthCheckInfo{.need_result = need_result});
         info.retry_task_id = event_loop::schedule(this->vpn->parameters.ev_loop,
                 {
                         this,
                         [](void *arg, TaskId) {
                             auto *self = (Http3Upstream *) arg;
+                            bool nr = self->m_health_check_info.has_value()
+                                    ? self->m_health_check_info->need_result
+                                    : true;
                             self->m_health_check_info->retry_task_id.release();
-                            self->do_health_check();
+                            self->do_health_check(nr);
                         },
                 },
                 this->vpn->upstream_config.health_check_timeout / 10);
@@ -564,13 +566,47 @@ void Http3Upstream::do_health_check() {
                             this,
                             [](void *arg, TaskId) {
                                 auto *self = (Http3Upstream *) arg;
+                                bool nr = self->m_health_check_info.has_value()
+                                        ? self->m_health_check_info->need_result
+                                        : true;
                                 self->m_health_check_info.reset();
                                 VpnError e = {VPN_EC_ERROR, "Failed to send health check request"};
-                                self->handler.func(self->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &e);
+                                self->report_health_check_error(nr, e);
                             },
                     },
                     {}),
+            .need_result = need_result,
     };
+}
+
+void Http3Upstream::report_health_check_error(bool need_result, VpnError error) {
+    log_upstream(this, warn, "Health check result: {} ({}) need_result={} tcp_conns={}",
+            safe_to_string_view(error.text), error.code, need_result, m_tcp_connections.size());
+    if (need_result) {
+        this->handler.func(this->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &error);
+        return;
+    }
+
+    // Periodic probe under multi-H3: do not kill a busy child (same policy as H2 multi).
+    {
+        using clock = std::chrono::steady_clock;
+        const auto now_ms = duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
+        const auto max_age_ms = health_check_busy_skip_max_age_ms(
+                this->vpn->upstream_config.health_check_timeout.count(),
+                this->vpn->upstream_config.timeout.count());
+        if (!m_tcp_connections.empty() && m_last_app_progress_steady_ms.has_value()
+                && now_ms >= *m_last_app_progress_steady_ms
+                && uint64_t(now_ms - *m_last_app_progress_steady_ms) <= max_age_ms) {
+            log_upstream(this, warn,
+                    "Periodic HC failed but session has app traffic (conns={}, app_age_ms={}) — keeping H3 session",
+                    m_tcp_connections.size(), now_ms - *m_last_app_progress_steady_ms);
+            return;
+        }
+    }
+
+    log_upstream(this, warn, "Periodic HC failed — closing this H3 upstream only (mux may keep others)");
+    ServerError err_event = {NON_ID, error};
+    this->handler.func(this->handler.arg, SERVER_EVENT_ERROR, &err_event);
 }
 
 void Http3Upstream::cancel_health_check() {
@@ -876,14 +912,17 @@ void Http3Upstream::on_stream_closed(void *arg, uint64_t stream_id, int error_co
         if (self->m_health_check_info->error.code == VPN_EC_NOERROR) {
             log_upstream(self, info, "Health check: OK (stream closed cleanly)");
             stream_close_code = H3_NO_ERROR;
+            self->m_health_check_info.reset();
         } else {
             log_upstream(self, warn, "Health check: failed {} ({})",
                     safe_to_string_view(self->m_health_check_info->error.text),
                     self->m_health_check_info->error.code);
             // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-            self->handler.func(self->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &self->m_health_check_info->error);
+            const bool nr = self->m_health_check_info->need_result;
+            VpnError e = self->m_health_check_info->error;
+            self->m_health_check_info.reset();
+            self->report_health_check_error(nr, e);
         }
-        self->m_health_check_info.reset();
     } else if (auto [conn_id, conn] = self->get_tcp_conn_by_stream_id(stream_id); conn == nullptr) {
         log_stream(self, stream_id, dbg, "Got stream close on already-closed connection");
     } else if (conn->pending_error.has_value()) {

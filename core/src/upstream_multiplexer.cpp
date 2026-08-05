@@ -215,7 +215,7 @@ void UpstreamMultiplexer::do_health_check() {
 
     if (started == 0) {
         log_mux(this, warn, "No health check has been started: there are no open sessions");
-        VpnError e = {VPN_EC_ERROR, "No open H2 sessions for health check"};
+        VpnError e = {VPN_EC_ERROR, "No open upstream sessions for health check"};
         this->handler.func(this->handler.arg, SERVER_EVENT_HEALTH_CHECK_ERROR, &e);
         return;
     }

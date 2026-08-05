@@ -86,7 +86,8 @@ int run_client(const cxxopts::ParseResult &cli_args);
 // ---------------------------------------------------------------------------
 
 static void note_event(const char *fmt, ...) {
-    char buf[sizeof(g_last_event)];
+    // Leave room for "#%llu " prefix in g_last_event (Werror=format-truncation).
+    char buf[sizeof(g_last_event) > 32 ? sizeof(g_last_event) - 32 : 64];
     va_list ap;
     va_start(ap, fmt);
     (void) vsnprintf(buf, sizeof(buf), fmt, ap);

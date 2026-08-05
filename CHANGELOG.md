@@ -9,8 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Added `http2_connections_num` to configure the maximum number of parallel HTTP/2 sessions.
+- HTTP/3 multi-session: same parallel-session knob as H2 (`http2_connections_num`) opens N independent QUIC/H3 sessions via `UpstreamMultiplexer` for multi-DL parity with H2 multi-5.
 
 ### Changed
+
+- `http2_connections_num` applies to H2 **or** H3 depending on `upstream_protocol` (config key unchanged for compatibility).
 
 ### Deprecated
 
@@ -20,6 +23,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Prevented endpoint certificate-verification bypass through pinger handoff, TLS session reuse, or mismatched configured identities.
 - Prevented MIPSEL client startup crashes by disabling OpenSSL MIPS assembly in Zig/LLD builds.
+- Multi-DL SIGSEGV in H2 `complete_read` after unread drain (`si_addr=0`).
+- H3 health checks under multi-session use soft periodic probes (same busy/traffic policy as H2 multi).
 
 ### Security
 
