@@ -1,16 +1,23 @@
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <cstdarg>
 #include <csignal>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
 
 #ifndef _WIN32
+#include <dirent.h>
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -39,6 +46,7 @@
 
 #ifdef __linux__
 #include <net/if.h>
+#include <sys/resource.h>
 #endif
 
 static constexpr std::string_view DEFAULT_CONFIG_FILE = "trusttunnel_client.toml";
@@ -50,6 +58,9 @@ static std::atomic_bool keep_running{true};
 static std::condition_variable g_waiter;
 static std::mutex g_waiter_mutex;
 static std::weak_ptr<TrustTunnelClient> g_client;
+// Last breadcrumb for crash dumps (async-signal-safe: fixed buffer only).
+static char g_last_event[256] = "boot";
+static std::atomic<uint64_t> g_event_seq{0};
 
 static std::function<void(SocketProtectEvent *)> get_protect_socket_callback(const TrustTunnelConfig &config);
 static std::function<void(VpnVerifyCertificateEvent *)> get_verify_certificate_callback();
@@ -66,36 +77,143 @@ static bool g_svc_running = false;
 
 int run_client(const cxxopts::ParseResult &cli_args);
 
-static void stop_trusttunnel_client() {
-    keep_running = false;
-    g_waiter.notify_all();
+// ---------------------------------------------------------------------------
+// Diagnostics: always go to stderr (procd → logread) AND the app logger.
+// ---------------------------------------------------------------------------
+
+static void note_event(const char *fmt, ...) {
+    char buf[sizeof(g_last_event)];
+    va_list ap;
+    va_start(ap, fmt);
+    (void) vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    // Best-effort copy into global breadcrumb (racy under multi-thread; good enough).
+    std::snprintf(g_last_event, sizeof(g_last_event), "#%llu %s",
+            (unsigned long long) ++g_event_seq, buf);
+    errlog(g_logger, "EVENT {}", g_last_event);
+    // Force visibility even if logger level is wrong.
+    std::fprintf(stderr, "trusttunnel_client EVENT %s\n", g_last_event);
+    std::fflush(stderr);
 }
 
-static void sighandler(int sig) {
-    signal(SIGINT, SIG_DFL);
-    signal(SIGTERM, SIG_DFL);
-
-    if (auto client = g_client.lock()) {
+static void dump_file_to_stderr(const char *path, const char *label, size_t max_bytes = 4096) {
 #ifndef _WIN32
-        if (sig == SIGHUP) {
-            client->notify_network_change(ag::VPN_NS_NOT_CONNECTED);
-            std::thread t([client]() {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                client->notify_network_change(ag::VPN_NS_CONNECTED);
-            });
-            t.detach();
-            return;
-        }
-#endif
-        stop_trusttunnel_client();
-    } else {
-        exit(1);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        std::fprintf(stderr, "  %s: (open failed %s errno=%d)\n", label, path, errno);
+        return;
     }
+    std::fprintf(stderr, "  --- %s (%s) ---\n", label, path);
+    char buf[512];
+    size_t total = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0) {
+            break;
+        }
+        size_t take = (size_t) n;
+        if (total + take > max_bytes) {
+            take = max_bytes - total;
+        }
+        (void) write(STDERR_FILENO, buf, take);
+        total += take;
+        if (total >= max_bytes) {
+            std::fprintf(stderr, "\n  ... truncated at %zu bytes\n", max_bytes);
+            break;
+        }
+    }
+    if (total == 0 || (total > 0 && buf[(total - 1) % sizeof(buf)] != '\n')) {
+        std::fputc('\n', stderr);
+    }
+    close(fd);
+#else
+    (void) path;
+    (void) label;
+    (void) max_bytes;
+#endif
+}
+
+static int count_fds() {
+#ifndef _WIN32
+    DIR *d = opendir("/proc/self/fd");
+    if (!d) {
+        return -1;
+    }
+    int n = 0;
+    while (readdir(d) != nullptr) {
+        ++n;
+    }
+    closedir(d);
+    return n > 2 ? n - 2 : n; // ., ..
+#else
+    return -1;
+#endif
+}
+
+/** Full process dump for logread. Safe from normal threads; not for signal handlers. */
+static void dump_process_diagnostics(const char *why) {
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+#ifndef _WIN32
+    const int pid = (int) getpid();
+#else
+    const int pid = 0;
+#endif
+    std::fprintf(stderr,
+            "\n========== trusttunnel_client DEATH_DUMP begin why=%s pid=%d last_event=%s wall_ms=%lld ==========\n",
+            why ? why : "?", pid, g_last_event, (long long) ms);
+    errlog(g_logger, "DEATH_DUMP begin why={} pid={} last_event={}", why ? why : "?", pid, g_last_event);
+
+#ifndef _WIN32
+    dump_file_to_stderr("/proc/self/status", "proc_status", 8192);
+    dump_file_to_stderr("/proc/self/cmdline", "cmdline", 512);
+    dump_file_to_stderr("/proc/self/comm", "comm", 64);
+    dump_file_to_stderr("/proc/meminfo", "meminfo_head", 1500);
+    dump_file_to_stderr("/proc/self/limits", "limits", 2048);
+    dump_file_to_stderr("/proc/self/statm", "statm", 256);
+    dump_file_to_stderr("/proc/self/cgroup", "cgroup", 1024);
+    dump_file_to_stderr("/proc/self/oom_score", "oom_score", 64);
+    dump_file_to_stderr("/proc/self/oom_score_adj", "oom_score_adj", 64);
+    dump_file_to_stderr("/proc/net/dev", "net_dev", 4096);
+    // TCP/UDP socket counts (full table can be huge under load).
+    {
+        std::ifstream tcp("/proc/net/tcp");
+        std::ifstream tcp6("/proc/net/tcp6");
+        std::ifstream udp("/proc/net/udp");
+        auto count_lines = [](std::ifstream &f) -> int {
+            int n = 0;
+            std::string line;
+            while (std::getline(f, line)) {
+                ++n;
+            }
+            return n > 0 ? n - 1 : 0; // skip header
+        };
+        std::fprintf(stderr, "  sockets: tcp4=%d tcp6=%d udp4=%d fd_count≈%d\n", count_lines(tcp), count_lines(tcp6),
+                count_lines(udp), count_fds());
+    }
+    {
+        struct rusage ru {};
+        if (getrusage(RUSAGE_SELF, &ru) == 0) {
+            std::fprintf(stderr, "  rusage: maxrss_kb=%ld utime=%ld.%06ld stime=%ld.%06ld nvcsw=%ld nivcsw=%ld\n",
+                    (long) ru.ru_maxrss, (long) ru.ru_utime.tv_sec, (long) ru.ru_utime.tv_usec, (long) ru.ru_stime.tv_sec,
+                    (long) ru.ru_stime.tv_usec, (long) ru.ru_nvcsw, (long) ru.ru_nivcsw);
+        }
+    }
+    // tun0 presence
+    dump_file_to_stderr("/sys/class/net/tun0/operstate", "tun0_operstate", 64);
+    dump_file_to_stderr("/sys/class/net/tun0/statistics/rx_bytes", "tun0_rx_bytes", 64);
+    dump_file_to_stderr("/sys/class/net/tun0/statistics/tx_bytes", "tun0_tx_bytes", 64);
+    dump_file_to_stderr("/proc/self/maps", "maps_head", 2048);
+#endif
+
+    std::fprintf(stderr, "========== trusttunnel_client DEATH_DUMP end why=%s ==========\n\n", why ? why : "?");
+    std::fflush(stderr);
+    errlog(g_logger, "DEATH_DUMP end why={}", why ? why : "?");
 }
 
 #ifndef _WIN32
-// Async-signal-safe breadcrumb for silent OpenWrt process death (no app logs before ifdown).
-static void fatal_signal_handler(int sig) {
+/** Async-signal-safe minimal dump (only write/open/read). */
+static void dump_process_diagnostics_signal_safe(int sig) {
     const char *name = "SIGNAL";
     if (sig == SIGSEGV) {
         name = "SIGSEGV";
@@ -108,12 +226,78 @@ static void fatal_signal_handler(int sig) {
     } else if (sig == SIGILL) {
         name = "SIGILL";
     }
-    // write(2) only — logger is not async-signal-safe.
-    const char prefix[] = "trusttunnel_client: fatal ";
-    const char suffix[] = " — process aborting (procd will respawn)\n";
-    (void) write(STDERR_FILENO, prefix, sizeof(prefix) - 1);
+    const char head[] = "\n========== trusttunnel_client FATAL_SIGNAL ";
+    const char mid[] = " last_event=";
+    const char tail[] = " ==========\n";
+    (void) write(STDERR_FILENO, head, sizeof(head) - 1);
     (void) write(STDERR_FILENO, name, strlen(name));
-    (void) write(STDERR_FILENO, suffix, sizeof(suffix) - 1);
+    (void) write(STDERR_FILENO, mid, sizeof(mid) - 1);
+    (void) write(STDERR_FILENO, g_last_event, strlen(g_last_event));
+    (void) write(STDERR_FILENO, tail, sizeof(tail) - 1);
+
+    auto dump_path = [](const char *path) {
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            return;
+        }
+        char b[256];
+        for (;;) {
+            ssize_t n = read(fd, b, sizeof(b));
+            if (n <= 0) {
+                break;
+            }
+            (void) write(STDERR_FILENO, b, (size_t) n);
+        }
+        (void) write(STDERR_FILENO, "\n", 1);
+        close(fd);
+    };
+    dump_path("/proc/self/status");
+    dump_path("/proc/self/oom_score");
+    dump_path("/proc/meminfo");
+}
+#endif
+
+static void stop_trusttunnel_client(const char *why = "stop_trusttunnel_client") {
+    note_event("stop_trusttunnel_client: %s", why ? why : "unspecified");
+    dump_process_diagnostics(why ? why : "stop_trusttunnel_client");
+    keep_running = false;
+    g_waiter.notify_all();
+}
+
+static void on_atexit_dump() {
+    // If we are exiting the process, always leave a dump in logread.
+    dump_process_diagnostics("atexit");
+}
+
+static void sighandler(int sig) {
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+
+    if (auto client = g_client.lock()) {
+#ifndef _WIN32
+        if (sig == SIGHUP) {
+            note_event("SIGHUP → synthetic network flap");
+            client->notify_network_change(ag::VPN_NS_NOT_CONNECTED);
+            std::thread t([client]() {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                client->notify_network_change(ag::VPN_NS_CONNECTED);
+            });
+            t.detach();
+            return;
+        }
+#endif
+        char why[64];
+        std::snprintf(why, sizeof(why), "signal_%d", sig);
+        stop_trusttunnel_client(why);
+    } else {
+        dump_process_diagnostics("signal_no_client");
+        exit(1);
+    }
+}
+
+#ifndef _WIN32
+static void fatal_signal_handler(int sig) {
+    dump_process_diagnostics_signal_safe(sig);
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -125,12 +309,12 @@ static void setup_sighandler() {
     signal(SIGTERM, sighandler);
 #else
     signal(SIGPIPE, SIG_IGN);
-    // Leave a journal breadcrumb on hard crash (previously: silent ifdown + new PID only).
     signal(SIGSEGV, fatal_signal_handler);
     signal(SIGABRT, fatal_signal_handler);
     signal(SIGBUS, fatal_signal_handler);
     signal(SIGFPE, fatal_signal_handler);
     signal(SIGILL, fatal_signal_handler);
+    std::atexit(on_atexit_dump);
     // Block SIGINT and SIGTERM - they will be waited using sigwait().
     sigset_t sigset; // NOLINT(cppcoreguidelines-init-variables)
     sigemptyset(&sigset);
@@ -360,23 +544,30 @@ static bool is_fatal_disconnect_error(int code) {
 
 static std::function<void(VpnStateChangedEvent *)> get_state_changed_callback() {
     return [](VpnStateChangedEvent *event) {
+        note_event("VPN_STATE %s err_code=%d err_text=%s", magic_enum::enum_name(event->state).data(),
+                event->error.code, safe_to_string_view(event->error.text).data());
+        // Snapshot on every non-connected transition so logread has a trail before death.
+        if (event->state != VPN_SS_CONNECTED && event->state != VPN_SS_CONNECTING) {
+            dump_process_diagnostics(magic_enum::enum_name(event->state).data());
+        }
         switch (event->state) {
         case VPN_SS_DISCONNECTED:
             if (event->error.code != 0) {
                 errlog(g_logger, "Error: {} {}", event->error.code, safe_to_string_view(event->error.text));
             }
+            dump_process_diagnostics("VPN_SS_DISCONNECTED");
             // OpenWrt daemon: process exit → procd respawn → tun0 ifdown/up → multi-second outage.
             // Only exit on fatal auth/location/cert failures. Otherwise reconnect in-process.
             if (is_fatal_disconnect_error(event->error.code)) {
-                errlog(g_logger, "Fatal disconnect — stopping client process");
-                stop_trusttunnel_client();
+                stop_trusttunnel_client("fatal_disconnect");
             } else if (auto client = g_client.lock()) {
                 warnlog(g_logger,
                         "Non-fatal disconnect (code={}) — in-process reconnect (keep process/tun alive)",
                         event->error.code);
+                note_event("request_reconnect after non-fatal DISCONNECTED code=%d", event->error.code);
                 client->request_reconnect();
             } else {
-                stop_trusttunnel_client();
+                stop_trusttunnel_client("disconnect_no_client");
             }
             break;
         case VPN_SS_WAITING_RECOVERY:
@@ -385,12 +576,18 @@ static std::function<void(VpnStateChangedEvent *)> get_state_changed_callback() 
                     safe_to_string_view(event->waiting_recovery_info.error.text));
             break;
         case VPN_SS_CONNECTED: {
+            note_event("Successfully connected to endpoint");
             infolog(g_logger, "Successfully connected to endpoint");
             break;
         }
         case VPN_SS_CONNECTING:
+            note_event("VPN_SS_CONNECTING");
+            break;
         case VPN_SS_RECOVERING:
+            note_event("VPN_SS_RECOVERING");
+            break;
         case VPN_SS_WAITING_FOR_NETWORK:
+            note_event("VPN_SS_WAITING_FOR_NETWORK");
             break;
         }
     };

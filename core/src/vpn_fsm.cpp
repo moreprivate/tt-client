@@ -416,10 +416,12 @@ static void prepare_for_recovery(void *ctx, void *data) {
     if (!vpn->pending_error.has_value() && error != nullptr && error->code != VPN_EC_NOERROR) {
         vpn->pending_error = *error;
     }
-    log_vpn(vpn, info, "Entering recovery: reason={} ({}) fsm_state={}",
+    log_vpn(vpn, warn,
+            "Entering recovery: reason={} ({}) fsm_state={} client_state={} connected_once={} recovery_attempts={}",
             safe_to_string_view(vpn->pending_error.value_or(VpnError{}).text),
             vpn->pending_error.value_or(VpnError{}).code,
-            magic_enum::enum_name((VpnSessionState) vpn->fsm.get_state()));
+            magic_enum::enum_name((VpnSessionState) vpn->fsm.get_state()),
+            (int) vpn->client_state, vpn->connected_once, vpn->recovery.attempts);
 
     vpn->disconnect();
     initiate_recovery(vpn);
