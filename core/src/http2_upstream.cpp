@@ -871,7 +871,13 @@ void Http2Upstream::complete_read(void *arg, TaskId) {
     int r = upstream->read_out_pending_data(ctx->id, conn);
     if (r < 0) {
         upstream->close_tcp_connection(ctx->id, false);
-    } else if (conn->unread_data->size() == 0 && conn->flags.test(TcpConnection::TCF_STREAM_CLOSED)) {
+        return;
+    }
+
+    // read_out_pending_data() resets unread_data to nullptr when empty. Do not
+    // dereference it — that was the multi-DL SIGSEGV (si_addr=0 @ complete_read:874).
+    const bool unread_empty = (conn->unread_data == nullptr || conn->unread_data->size() == 0);
+    if (unread_empty && conn->flags.test(TcpConnection::TCF_STREAM_CLOSED)) {
         upstream->handler.func(upstream->handler.arg, SERVER_EVENT_CONNECTION_CLOSED, &ctx->id);
         upstream->clean_tcp_connection_data(ctx->id);
     }
