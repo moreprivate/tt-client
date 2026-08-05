@@ -203,6 +203,13 @@ struct ConnectingVpnManagerTest : MockedTest {
             vpn->fsm.perform_transition(vpn_fsm::CE_NETWORK_CHANGE, (void *) &state);
         });
     }
+
+    // Product default: first recovery fires at 0ms. Tests that need a stable WAITING_RECOVERY
+    // dwell (pending scheduled task, connect-request policy before RECOVERING) must seed a
+    // non-zero gap before the disconnect that starts recovery.
+    void seed_recovery_wait(Millis delay = Millis{1000}) {
+        vpn->recovery.time.between_attempts = delay;
+    }
 };
 
 struct ConnectedVpnManagerTest : public ConnectingVpnManagerTest {
@@ -228,6 +235,7 @@ TEST_F(ConnectedVpnManagerTest, BypassRequestsAreBypassedImmediately) {
     for (bool kill_switch : {false, true}) {
         c.reset();
 
+        seed_recovery_wait();
         raise_client_event(vpn_client::EVENT_DISCONNECTED);
         ASSERT_TRUE(await_state_change(VPN_SS_WAITING_RECOVERY));
         vpn->client.kill_switch_on = kill_switch;
@@ -256,6 +264,7 @@ TEST_F(ConnectedVpnManagerTest, RedirectRequestsArePostponed) {
     for (bool kill_switch : {false, true}) {
         c.reset();
 
+        seed_recovery_wait();
         raise_client_event(vpn_client::EVENT_DISCONNECTED);
         ASSERT_TRUE(await_state_change(VPN_SS_WAITING_RECOVERY));
         vpn->client.kill_switch_on = kill_switch;
@@ -295,6 +304,7 @@ TEST_F(ConnectedVpnManagerTest, KillSwitchOff) {
 
     vpn->client.kill_switch_on = false;
 
+    seed_recovery_wait();
     raise_client_event(vpn_client::EVENT_DISCONNECTED);
     ASSERT_TRUE(await_state_change(VPN_SS_WAITING_RECOVERY));
 
@@ -331,6 +341,7 @@ TEST_F(ConnectedVpnManagerTest, KillSwitchOn) {
 
     vpn->client.kill_switch_on = true;
 
+    seed_recovery_wait();
     raise_client_event(vpn_client::EVENT_DISCONNECTED);
     ASSERT_TRUE(await_state_change(VPN_SS_WAITING_RECOVERY));
     VpnConnectionInfo info{.id = 1, .action = VPN_CA_DEFAULT};
@@ -501,6 +512,7 @@ TEST_F(ConnectedVpnManagerTest, RecoveryStateResetAfterFatalDisconnect) {
 // attempt and cancels the previously scheduled recovery task, so the stale task can't fire
 // later and clobber the recovery state.
 TEST_F(ConnectedVpnManagerTest, NetworkChangeDuringRecoveryCancelsPendingTask) {
+    seed_recovery_wait();
     raise_client_event(vpn_client::EVENT_DISCONNECTED);
     ASSERT_TRUE(await_state_change(VPN_SS_WAITING_RECOVERY));
 
@@ -508,7 +520,7 @@ TEST_F(ConnectedVpnManagerTest, NetworkChangeDuringRecoveryCancelsPendingTask) {
     ASSERT_TRUE(vpn->recovery.task.has_value());
     const uint32_t attempts_before = vpn->recovery.attempts;
 
-    // A network change triggers recovery immediately (the 0ms task wins over the 1s timer).
+    // A network change triggers recovery immediately (cancels the pending timer).
     notify_network_change(VPN_NS_CONNECTED);
     ASSERT_TRUE(wait_state(VPN_SS_RECOVERING));
 
@@ -556,6 +568,7 @@ TEST_F(ConnectedVpnManagerTest, FlappingNetworkKeepsRecovering) {
 // `initiate_recovery` would measure `elapsed` from a stale (epoch) timestamp and collapse the
 // inter-attempt backoff delay to zero.
 TEST_F(ConnectedVpnManagerTest, NetworkChangeRecordsRecoveryAttemptStart) {
+    seed_recovery_wait();
     raise_client_event(vpn_client::EVENT_DISCONNECTED);
     ASSERT_TRUE(await_state_change(VPN_SS_WAITING_RECOVERY));
 
