@@ -8,6 +8,7 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/net_utils.h"
+#include "vpn/event_loop.h"
 #include "vpn/internal/vpn_client.h"
 
 #define log_mux(mux_, lvl_, fmt_, ...) lvl_##log((mux_)->m_log, "[{}] " fmt_, (mux_)->id, ##__VA_ARGS__)
@@ -264,33 +265,43 @@ void UpstreamMultiplexer::on_icmp_request(IcmpEchoRequestEvent &event) {
 }
 
 void UpstreamMultiplexer::close_upstream(int upstream_id, bool replenish) {
-    log_ups(this, upstream_id, dbg, "...");
+    log_ups(this, upstream_id, warn, "close_upstream replenish={} pool_size={}", replenish, m_upstreams_pool.size());
 
     auto it = m_upstreams_pool.find(upstream_id);
     if (it == m_upstreams_pool.end()) {
-        log_ups(this, upstream_id, warn, "Upstream not found");
-        assert(0);
+        log_ups(this, upstream_id, warn, "Upstream not found (already closed)");
         return;
     }
 
+    // Drop connection bookkeeping for this child before destroying it so later
+    // CONNECTION_CLOSED / ERROR events cannot look up a freed UpstreamCtx.
+    for (auto i = m_connections.begin(); i != m_connections.end();) {
+        if (i->second.upstream_id == upstream_id) {
+            i = m_connections.erase(i);
+        } else {
+            ++i;
+        }
+    }
+    for (auto i = m_pending_connections.begin(); i != m_pending_connections.end();) {
+        if (i->second.upstream_id == upstream_id) {
+            ServerError err_event = {i->first, {ag::utils::AG_ECONNREFUSED, "Upstream closed"}};
+            this->handler.func(this->handler.arg, SERVER_EVENT_ERROR, &err_event);
+            i = m_pending_connections.erase(i);
+        } else {
+            ++i;
+        }
+    }
+
+    // Destroy child. Do NOT open a replacement here: sync replenish from inside
+    // child_upstream_handler (which is often nested in Http2Upstream::close_session_inner
+    // / net_handler) was a use-after-free risk under multi-H2 load (SIGSEGV after CONNECTED).
+    // New children are still created on demand via open_connection → open_new_upstream.
+    (void) replenish;
     m_upstreams_pool.erase(it);
 
-    log_mux(this, info, "Closed child upstream id={}; remaining upstreams={}, connections={}, pending={}",
+    log_mux(this, warn, "Closed child upstream id={}; remaining upstreams={}, connections={}, pending={}",
             upstream_id, m_upstreams_pool.size(), m_connections.size(), m_pending_connections.size());
     if (!m_upstreams_pool.empty()) {
-        // Keep multi-H2 capacity on soft single-child death. Never replenish while tearing
-        // down the whole pool (fatal error path passes replenish=false).
-        if (replenish && m_session_open && m_upstreams_pool.size() < m_max_upstreams_num) {
-            // Always allocate a fresh id (do not reuse select_upstream_for_connection —
-            // it prefers existing underloaded children and would skip replenish).
-            static std::atomic<int> next_replenish_id{1'000'000};
-            const int new_id = next_replenish_id.fetch_add(1, std::memory_order_relaxed);
-            log_mux(this, info, "Replenishing H2 pool: opening replacement upstream id={} (pool {}/{})",
-                    new_id, m_upstreams_pool.size() + 1, m_max_upstreams_num);
-            if (!open_new_upstream(new_id, std::nullopt)) {
-                log_mux(this, warn, "Failed to open replacement upstream id={}", new_id);
-            }
-        }
         return;
     }
 
@@ -350,12 +361,18 @@ void UpstreamMultiplexer::child_upstream_handler(void *arg, ServerEvent what, vo
             }
         }
 
-        mux->close_upstream(ctx->id);
+        // Defer destroy: SESSION_CLOSED is often raised from close_session_inner while
+        // still on the Http2Upstream stack (net_handler). Erasing here frees `this`.
+        const int closed_id = ctx->id;
+        log_mux(mux, warn, "SESSION_CLOSED on U:{} — defer pool erase", closed_id);
+        event_loop::submit(mux->vpn->parameters.ev_loop, [mux, closed_id]() {
+            mux->close_upstream(closed_id, /*replenish=*/false);
+        }).release();
         break;
     }
     case SERVER_EVENT_CONNECTION_CLOSED: {
         uint64_t id = *(uint64_t *) data;
-        assert(mux->m_connections.count(id) != 0);
+        // Connection may already be dropped in close_upstream; do not assert/crash.
         mux->m_connections.erase(id);
         log_mux(mux, dbg, "Remaining upstreams={} connections={} pending connections={}", mux->m_upstreams_pool.size(),
                 mux->m_connections.size(), mux->m_pending_connections.size());
@@ -382,22 +399,33 @@ void UpstreamMultiplexer::child_upstream_handler(void *arg, ServerEvent what, vo
                     mux->m_upstreams_pool.size(), mux->m_connections.size(), mux->m_pending_connections.size());
             mux->handler.func(mux->handler.arg, SERVER_EVENT_ERROR, data);
         } else if (is_fatal_error(event->error)) {
-            log_mux(mux, info, "Error on upstream id={} is fatal, closing all upstreams: ({}) {}", ctx->id,
-                    event->error.code, event->error.text);
+            log_mux(mux, warn, "Error on upstream id={} is fatal, closing all upstreams: ({}) {}", ctx->id,
+                    event->error.code, event->error.text ? event->error.text : "");
             if (event->error.code != 0) {
                 mux->m_pending_error = event->error;
             }
-            while (!mux->m_upstreams_pool.empty()) {
-                const auto it = mux->m_upstreams_pool.begin();
-                it->second->upstream->close_session();
-                auto upstream_id = it->first;
-                mux->close_upstream(upstream_id, /*replenish=*/false);
+            // Close sockets first (no erase), then defer pool wipe so nested handlers finish.
+            std::vector<int> ids;
+            ids.reserve(mux->m_upstreams_pool.size());
+            for (auto &[id, info] : mux->m_upstreams_pool) {
+                info->upstream->close_session();
+                ids.push_back(id);
             }
+            event_loop::submit(mux->vpn->parameters.ev_loop, [mux, ids = std::move(ids)]() {
+                for (int id : ids) {
+                    mux->close_upstream(id, /*replenish=*/false);
+                }
+            }).release();
         } else {
-            log_mux(mux, info, "Error on upstream id={} is non-fatal, closing upstream: ({}) {}", ctx->id,
-                    event->error.code, event->error.text);
+            log_mux(mux, warn, "Error on upstream id={} is non-fatal, closing upstream: ({}) {}", ctx->id,
+                    event->error.code, event->error.text ? event->error.text : "");
+            // close_session may already have run (close_session_inner → ERROR). Safe if idempotent.
             pool_it->second->upstream->close_session();
-            mux->close_upstream(ctx->id, /*replenish=*/true);
+            // Defer erase: ERROR is often delivered from close_session_inner on this object.
+            const int closed_id = ctx->id;
+            event_loop::submit(mux->vpn->parameters.ev_loop, [mux, closed_id]() {
+                mux->close_upstream(closed_id, /*replenish=*/false);
+            }).release();
         }
         break;
     }
