@@ -232,11 +232,12 @@ typedef struct {
      */
     VpnUpstreamProtocol main_protocol;
     /**
-     * Number of parallel upstream sessions (HTTP/2 or HTTP/3). If 0, the default value will be used.
+     * Number of parallel upstream sessions (HTTP/2 or HTTP/3). If 0, the default value will be used
+     * (UpstreamMultiplexer::DEFAULT_UPSTREAMS_NUM, currently 5).
      * Applies to whichever `main_protocol` is selected (H2 multi TCP sessions or H3 multi QUIC).
-     * Config key remains `http2_connections_num` for backward compatibility.
+     * Config key: `http_connections_num`.
      */
-    uint32_t http2_connections_num;
+    uint32_t http_connections_num;
     /**
      * A location to connect to. An endpoint is selected by the location ping algorithm,
      * see `locations_pinger_t` for details.

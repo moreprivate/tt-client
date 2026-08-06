@@ -69,26 +69,72 @@ all: build_trusttunnel_client build_wizard
 init:
 	git config core.hooksPath ./scripts/hooks
 
+# Local Python venv for Conan / clangd-tidy (same idea as tt-manage setup-client).
+# CMake must also see this Conan: find_program(CONAN_COMMAND) during configure.
+# A venv created inside Docker (shebangs like /workspace/... or python linked to a
+# container-only path) is unusable on the host — ensure_venv detects and rebuilds it.
+VENV := env
+VENV_PY := $(VENV)/bin/python3
+VENV_BIN := $(abspath $(VENV)/bin)
+VENV_CONAN := $(VENV_BIN)/conan
+# Prepend venv to PATH so cmake --preset / conan_provider / bootstrap find `conan`.
+export PATH := $(VENV_BIN):$(PATH)
+ifneq ($(SKIP_VENV),1)
+CMAKE_CONAN_ARGS := -DCONAN_COMMAND=$(VENV_CONAN)
+endif
+
+.PHONY: ensure_venv
+## Create or recreate ./env if missing/broken (stale python symlink, Docker paths, no pip).
+## Installs requirements.txt and Conan into the venv when needed.
+ensure_venv:
+ifeq ($(SKIP_VENV),1)
+	@command -v python3 >/dev/null 2>&1 || { echo 'error: python3 not found (SKIP_VENV=1)' >&2; exit 1; }
+	@command -v conan >/dev/null 2>&1 || { echo 'error: conan not on PATH (SKIP_VENV=1)' >&2; exit 1; }
+else
+	@set -e; \
+	need_venv=0; \
+	if [ ! -e '$(VENV_PY)' ] || [ ! -x '$(VENV_PY)' ]; then need_venv=1; \
+	elif ! '$(VENV_PY)' -c 'import sys' >/dev/null 2>&1; then need_venv=1; \
+	elif ! '$(VENV_PY)' -c 'import pip' >/dev/null 2>&1; then need_venv=1; \
+	elif [ -f '$(VENV)/pyvenv.cfg' ] && ! grep -qF '$(abspath $(VENV))' '$(VENV)/pyvenv.cfg'; then \
+	  echo "Python venv path mismatch (host vs Docker); will recreate"; \
+	  need_venv=1; \
+	elif [ -x '$(VENV_CONAN)' ] && ! '$(VENV_CONAN)' --version >/dev/null 2>&1; then \
+	  need_venv=1; \
+	fi; \
+	if [ "$$need_venv" = 1 ]; then \
+	  echo "Creating/recreating Python venv at $(VENV) (missing or broken)"; \
+	  rm -rf '$(VENV)'; \
+	  python3 -m venv --upgrade-deps '$(VENV)' || python3 -m venv '$(VENV)'; \
+	  '$(VENV_PY)' -c 'import ensurepip; ensurepip.bootstrap()' >/dev/null 2>&1 || true; \
+	  '$(VENV_PY)' -c 'import pip' \
+	    || { echo "error: venv still has no pip after recreate" >&2; exit 1; }; \
+	fi; \
+	'$(VENV_PY)' -m pip install --disable-pip-version-check -q -r requirements.txt; \
+	if [ ! -x '$(VENV_CONAN)' ] || ! '$(VENV_CONAN)' --version >/dev/null 2>&1; then \
+	  '$(VENV_PY)' -m pip install --disable-pip-version-check -q --force-reinstall 'conan>=2.0.5'; \
+	fi; \
+	'$(VENV_CONAN)' --version >/dev/null \
+	  || { echo "error: conan missing in $(VENV) after install" >&2; exit 1; }
+endif
+
 .PHONY: bootstrap_deps
 ## Export all the required conan packages to the local cache.
 ## Skips if all dependencies are already resolved in the local Conan cache.
-bootstrap_deps:
-	@if conan graph info . --profile:host=default >/dev/null 2>&1; then \
+bootstrap_deps: ensure_venv
+	@set -e; \
+	if conan graph info . --profile:host=default >/dev/null 2>&1; then \
 		echo "Conan dependencies already bootstrapped, skipping."; \
 	else \
 		$(MAKE) do_bootstrap_deps; \
 	fi
 
 .PHONY: do_bootstrap_deps
+do_bootstrap_deps: ensure_venv
 ifeq ($(SKIP_VENV),1)
-do_bootstrap_deps:
 	./scripts/bootstrap_conan_deps.py
 else
-do_bootstrap_deps:
-	python3 -m venv env && \
-	. env/bin/activate && \
-	pip install -r requirements.txt && \
-	./scripts/bootstrap_conan_deps.py
+	'$(VENV_PY)' ./scripts/bootstrap_conan_deps.py
 endif
 
 .PHONY: setup_cmake
@@ -108,22 +154,22 @@ setup_cmake: $(BUILD_DIR)/CMakeCache.txt
 # bootstrap_deps is order-only: it is phony, and a normal prerequisite would
 # make the cache look out of date on every run.
 ifeq ($(SKIP_BOOTSTRAP),1)
-$(BUILD_DIR)/CMakeCache.txt:
+$(BUILD_DIR)/CMakeCache.txt: | ensure_venv
 else
 $(BUILD_DIR)/CMakeCache.txt: | bootstrap_deps
 endif
-	cmake --preset $(PRESET) -B $(BUILD_DIR) $(OSX_ARCH_ARGS) $(CMAKE_ARGS)
+	cmake --preset $(PRESET) -B $(BUILD_DIR) $(OSX_ARCH_ARGS) $(CMAKE_ARGS) $(CMAKE_CONAN_ARGS)
 
 .PHONY: reconfigure
 ## Re-run the CMake configure step from scratch, e.g. after changing CMAKE_ARGS.
-reconfigure:
+reconfigure: ensure_venv
 	rm -f $(BUILD_DIR)/CMakeCache.txt
 	$(MAKE) setup_cmake
 
 .PHONY: compile_commands
 ## Generate compile_commands.json for IDE / clang-tidy integration.
-compile_commands:
-	cmake --preset $(PRESET) -B $(BUILD_DIR) $(OSX_ARCH_ARGS) $(CMAKE_ARGS) \
+compile_commands: ensure_venv
+	cmake --preset $(PRESET) -B $(BUILD_DIR) $(OSX_ARCH_ARGS) $(CMAKE_ARGS) $(CMAKE_CONAN_ARGS) \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
 .PHONY: build_libs
@@ -189,21 +235,11 @@ clang-tidy: compile_commands
 
 ## Check c++ code formatting with clangd-tidy.
 .PHONY: clangd-tidy
-clangd-tidy: compile_commands
-ifeq ($(SKIP_VENV),1)
+clangd-tidy: compile_commands ensure_venv
 	jq -r '.[] | select(.file | endswith(".cpp")) | .file' $(COMPILE_COMMANDS) \
 		| grep -vE '(^|/)(third-party)(/|$$)' \
 		| sort -u \
 		| xargs clangd-tidy -p $(BUILD_DIR) --tqdm -j$(NPROC)
-else
-	python3 -m venv env && \
-	. env/bin/activate && \
-	pip install -r requirements.txt && \
-	jq -r '.[] | select(.file | endswith(".cpp")) | .file' $(COMPILE_COMMANDS) \
-		| grep -vE '(^|/)(third-party)(/|$$)' \
-		| sort -u \
-		| xargs clangd-tidy -p $(BUILD_DIR) --tqdm -j$(NPROC)
-endif
 
 ## Lint markdown files.
 ## `markdownlint-cli` should be installed:

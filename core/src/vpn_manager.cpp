@@ -120,8 +120,8 @@ vpn_client::EndpointConnectionConfig Vpn::make_client_upstream_config() const {
     }
     if (chosen == VPN_UP_HTTP3) {
         main_protocol.type = VPN_UP_HTTP3;
-        // Reuse http2_connections_num as parallel session count (H2 TCP or H3 QUIC).
-        main_protocol.http3.connections_num = this->upstream_config->http2_connections_num;
+        // Parallel session count (H2 TCP or H3 QUIC) from http_connections_num.
+        main_protocol.http3.connections_num = this->upstream_config->http_connections_num;
         main_protocol.http3.quic_version = 0;
         if (this->client.quic_connector) {
             log_vpn(this, info, "Upstream transport: HTTP/3 ({} parallel session(s), QUIC handoff)",
@@ -132,7 +132,7 @@ vpn_client::EndpointConnectionConfig Vpn::make_client_upstream_config() const {
         }
     } else {
         main_protocol.type = VPN_UP_HTTP2;
-        main_protocol.http2.connections_num = this->upstream_config->http2_connections_num;
+        main_protocol.http2.connections_num = this->upstream_config->http_connections_num;
         if (this->upstream_config->main_protocol == VPN_UP_AUTO) {
             log_vpn(this, info, "AUTO location ping selected HTTP/2 (fresh TLS; probe not reused)");
         } else {

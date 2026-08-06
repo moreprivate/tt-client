@@ -155,13 +155,14 @@ constexpr int DEFAULT_LOCATION_PING_TIMEOUT_MS = 5000;
 constexpr std::string_view HTTP_METHOD_CONNECT = "CONNECT";
 constexpr std::string_view HTTP_METHOD_GET = "GET";
 
+// Default public DNS when config dns_upstreams is empty (Cloudflare).
 constexpr std::string_view AG_UNFILTERED_DNS_IPS_V4[] = {
-        "46.243.231.30",
-        "46.243.231.31",
+        "1.1.1.1",
+        "1.0.0.1",
 };
 constexpr std::string_view AG_UNFILTERED_DNS_IPS_V6[] = {
-        "2a10:50c0::1:ff",
-        "2a10:50c0::2:ff",
+        "2606:4700:4700::1111",
+        "2606:4700:4700::1001",
 };
 
 constexpr auto DPI_COOLDOWN_TIME = Millis{25}; // Time after the first part of the ClientHello is sent
