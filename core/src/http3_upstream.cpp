@@ -105,6 +105,9 @@ bool Http3Upstream::open_session(std::optional<Millis>) {
     // max_* must exceed initial_* or ngtcp2 auto-tune is a no-op (field DL stall).
     m_h3_settings.max_window = QUIC_CONNECTION_MAX_WINDOW_SIZE;
     m_h3_settings.max_stream_window = QUIC_STREAM_MAX_WINDOW_SIZE;
+    // CUBIC slow-start over one QUIC path underperformed multi-TCP H2 in field;
+    // BBR targets available bandwidth without relying on loss signals alone.
+    m_h3_settings.congestion_control_algorithm = http::Http3Settings::BBR;
 
     // Handoff — reuse connection pre-established by ping (optional fast path)
     if (this->vpn->quic_connector && this->vpn->quic_connector->client) {
@@ -391,17 +394,16 @@ ssize_t Http3Upstream::send(uint64_t id, const uint8_t *data, size_t length) {
 }
 
 void Http3Upstream::consume(uint64_t id, size_t length) {
-    // CLIENT_EVENT_DATA_SENT: LAN TCP accepted/sent these bytes. Mirror H2 stream FC.
+    // CLIENT_EVENT_DATA_SENT = LAN peer ACKed bytes (lwIP tcp_sent). Stream FC is
+    // already extended when body entered the tunnel (on_body / complete_read) so
+    // QUIC download is not gated on LAN RTT. Here: liveness + flush only.
     if (length == 0 || !m_h3_client) {
         return;
     }
-    auto it = m_tcp_connections.find(id);
-    if (it == m_tcp_connections.end()) {
+    if (m_tcp_connections.find(id) == m_tcp_connections.end()) {
         return;
     }
-    credit_stream_fc(it->second.stream_id, length);
     note_app_progress();
-    // Emit MAX_STREAM_DATA / MAX_DATA; safe outside the packet input handler.
     if (!m_in_handler) {
         m_h3_client->flush();
     }
@@ -834,10 +836,11 @@ void Http3Upstream::on_response(void *arg, uint64_t stream_id, http::Response re
 }
 
 // Called when body data arrives on a stream. Data is pushed by Http3Client.
-// TCP CONNECT body FC mirrors HTTP/2:
-//   - connection window: credit immediately (credit_connection_fc) so one slow
-//     stream cannot wedge every download on the shared connection window
-//   - stream window: credit in Http3Upstream::consume when LAN DATA_SENT fires
+// TCP CONNECT body FC:
+//   - connection window: credit immediately (multi-stream stays open)
+//   - stream window: credit when tunnel accepts bytes (raise_read / drain),
+//     NOT when LAN TCP ACKs (DATA_SENT). Waiting on tcp_raw_sent made DL track
+//     LAN RTT and field multi stuck ~7–8 Mbit while UL ~70.
 void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
     auto *self = (Http3Upstream *) arg;
     if (self->m_udp_mux.get_stream_id() == stream_id) {
@@ -883,6 +886,7 @@ void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
         conn = again.second;
     }
 
+    size_t stream_credited = 0;
     if (conn->flags.test(TcpConnection::TCF_READ_ENABLED) && !conn->has_unread_data()) {
         int r = self->raise_read_event(conn_id, chunk);
         if (r < 0) {
@@ -890,12 +894,19 @@ void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
             self->m_h3_client->consume_stream(stream_id, body_len);
             return;
         }
-        chunk.remove_prefix(r);
-        // Stream FC for the `r` bytes is deferred to DATA_SENT (consume()).
+        if (r > 0) {
+            // Extend stream RX when tunnel/lwIP accepted bytes — do NOT wait for
+            // LAN TCP ACK (DATA_SENT). Waiting on tcp_raw_sent gated DL to ~LAN RTT
+            // and field multi sat at ~7–8 Mbit while UL (client→server) hit ~70.
+            self->credit_stream_fc(stream_id, size_t(r));
+            stream_credited += size_t(r);
+            chunk.remove_prefix(r);
+        }
     }
 
     if (!chunk.empty()) {
         // Must copy undelivered body — on_body pointers are one-shot. Never drop.
+        // Stream FC for buffered bytes is extended when complete_read drains them.
         if (!self->push_unread_data(conn_id, conn, chunk)) {
             log_stream(self, stream_id, err, "Failed to buffer body ({}B) R:{} — closing stream", chunk.size(),
                     conn_id);
@@ -909,7 +920,8 @@ void Http3Upstream::on_body(void *arg, uint64_t stream_id, Uint8View chunk) {
         }
     }
 
-    // Connection-level FC now (multi-stream stays open). Stream-level on DATA_SENT.
+    // Connection-level FC for full body (multi-stream); stream for delivered only.
+    (void) stream_credited;
     self->credit_connection_fc(body_len);
 }
 
@@ -1326,7 +1338,8 @@ int Http3Upstream::read_out_pending_data(uint64_t conn_id, TcpConnection *conn) 
             } else {
                 m_total_unread_bytes = 0;
             }
-            // Stream FC when LAN DATA_SENT → consume(); do not credit here.
+            // Buffered body now accepted by tunnel — release stream RX credit.
+            credit_stream_fc(conn->stream_id, size_t(r));
         } else if (r < 0) {
             return r;
         } else {
