@@ -25,12 +25,20 @@ TEST(HealthCheckProbeSkip, SkipsWhenRecentAppProgress) {
     EXPECT_EQ(health_check_busy_skip_max_age_ms(0, 0), 1u);
 }
 
-// Long-lived multi-stream: full-size windows for throughput; soft unread hints.
+// Long-lived multi-stream: BDP-sized windows; max > initial enables auto-tune (DL path).
 TEST(QuicLongLivedBounds, WindowsAndUnreadCap) {
-    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 100ull * 1024 * 1024);
-    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 1ull * 1024 * 1024);
-    EXPECT_EQ(H3_MAX_UNREAD_PER_CONN, size_t(QUIC_STREAM_WINDOW_SIZE));
-    EXPECT_EQ(H3_MAX_UNREAD_GLOBAL, size_t(QUIC_CONNECTION_WINDOW_SIZE));
+    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 4ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_STREAM_MAX_WINDOW_SIZE, 16ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 24ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_CONNECTION_MAX_WINDOW_SIZE, 48ull * 1024 * 1024);
+    // Auto-tune ceilings MUST exceed initials — otherwise download stalls at initial BDP.
+    EXPECT_TRUE(h3_stream_autotune_enabled());
+    EXPECT_TRUE(h3_connection_autotune_enabled());
+    EXPECT_GT(QUIC_STREAM_MAX_WINDOW_SIZE, QUIC_STREAM_WINDOW_SIZE);
+    EXPECT_GT(QUIC_CONNECTION_MAX_WINDOW_SIZE, QUIC_CONNECTION_WINDOW_SIZE);
+    // Soft unread hints track max windows (log only; never drop body).
+    EXPECT_EQ(H3_MAX_UNREAD_PER_CONN, size_t(QUIC_STREAM_MAX_WINDOW_SIZE));
+    EXPECT_EQ(H3_MAX_UNREAD_GLOBAL, size_t(QUIC_CONNECTION_MAX_WINDOW_SIZE));
     EXPECT_FALSE(h3_unread_would_exceed_cap(0, 1, H3_MAX_UNREAD_PER_CONN));
     EXPECT_TRUE(h3_unread_would_exceed_cap(H3_MAX_UNREAD_PER_CONN, 1, H3_MAX_UNREAD_PER_CONN));
     EXPECT_TRUE(h3_global_unread_would_exceed(H3_MAX_UNREAD_GLOBAL, 1, H3_MAX_UNREAD_GLOBAL));

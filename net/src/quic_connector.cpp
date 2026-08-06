@@ -108,8 +108,9 @@ ag::VpnError ag::quic_connector_connect(
     settings.initial_max_stream_data_bidi_remote = QUIC_STREAM_WINDOW_SIZE;
     settings.initial_max_stream_data_uni = QUIC_STREAM_WINDOW_SIZE;
     settings.initial_max_streams_bidi = QUIC_MAX_STREAMS_NUM;
-    settings.max_window = QUIC_CONNECTION_WINDOW_SIZE;
-    settings.max_stream_window = QUIC_STREAM_WINDOW_SIZE;
+    // max_* must exceed initial_* or ngtcp2 auto-tune is a no-op (field DL stall).
+    settings.max_window = QUIC_CONNECTION_MAX_WINDOW_SIZE;
+    settings.max_stream_window = QUIC_STREAM_MAX_WINDOW_SIZE;
 
     // Set up callbacks for the ping phase
     ag::http::Http3Client::Callbacks callbacks{

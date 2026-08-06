@@ -19,20 +19,37 @@
 // stream traffic is not wedged behind one slow CONNECT (the failure mode that
 // required process restart).
 //
-// QUIC windows sized for throughput (100+ Mbps), not artificial OpenWrt starvation.
-// Stability = H2-style FC + free-on-empty + app-progress health checks — not tiny windows.
+// === Download path / BDP (OpenWrt field + quic-go / ngtcp2 docs) ===
+// Throughput ≤ window / RTT. At ~55 ms RTT and ~300 Mbit target:
+//   BDP ≈ 300e6/8 * 0.055 ≈ 2.1 MiB — stream RX must be multi-MB and grow.
+// Server (quiche) defaults: initial stream 1 MiB, max_stream_window 16 MiB —
+// so server RX auto-tunes → client UPLOAD ~70 Mbit worked in the field.
+// Client had max_stream_window == initial (1 MiB) → auto-tune cannot grow →
+// DOWNLOAD stuck ~8–30 Mbit while H2 multi hit ~180–280. Fix: initial stream
+// large enough for first RTTs, max_stream_window >> initial (match server 16 MiB).
+// Connection initial capped for OpenWrt RAM (~242 MiB); max > initial enables
+// conn-level auto-tune. Soft unread hints track max windows (log only).
 //
 // RSS product goal for long-lived OpenWrt (musl): **stable plateau** after bulk
 // (no climb/wedge), not matching post-restart cold RSS. musl does not return
 // small-heap pages to the OS; process restart is the only full baseline reset.
 
-static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 100ul * 1024 * 1024;
-static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 1ul * 1024 * 1024;
+// Initial stream RX (advertised in TP) — enough for ~150+ Mbit @ 55 ms without waiting for tune.
+static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 4ul * 1024 * 1024;
+// Auto-tune ceiling (ngtcp2 max_stream_window). MUST be > initial or growth is a no-op.
+// Matches tt-server QuicSettings::default_max_stream_window (16 MiB).
+static constexpr uint64_t QUIC_STREAM_MAX_WINDOW_SIZE = 16ul * 1024 * 1024;
+
+// Initial connection RX — multi-stream budget without 100 MiB OpenWrt RSS balloon.
+static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 24ul * 1024 * 1024;
+// Auto-tune ceiling for connection window (must be > initial).
+static constexpr uint64_t QUIC_CONNECTION_MAX_WINDOW_SIZE = 48ul * 1024 * 1024;
+
 static constexpr uint64_t QUIC_MAX_STREAMS_NUM = 4ul * 1024;
 
 // Soft app-unread hints for tests / logging only (never drop on_body data).
-static constexpr size_t H3_MAX_UNREAD_PER_CONN = size_t(QUIC_STREAM_WINDOW_SIZE);
-static constexpr size_t H3_MAX_UNREAD_GLOBAL = size_t(QUIC_CONNECTION_WINDOW_SIZE);
+static constexpr size_t H3_MAX_UNREAD_PER_CONN = size_t(QUIC_STREAM_MAX_WINDOW_SIZE);
+static constexpr size_t H3_MAX_UNREAD_GLOBAL = size_t(QUIC_CONNECTION_MAX_WINDOW_SIZE);
 
 /** True if pushing `add` would exceed `cap`. */
 static inline bool h3_unread_would_exceed_cap(size_t have, size_t add, size_t cap) {
@@ -64,4 +81,14 @@ static inline size_t h3_conn_credit_to_extend(size_t received, size_t &surplus) 
 /** Record that consume_stream(n) also extended the connection window by n. */
 static inline void h3_note_combined_stream_conn_credit(size_t n, size_t &surplus) {
     surplus += n;
+}
+
+/** True when stream auto-tune can grow past the initial TP (required for high-BDP DL). */
+static inline bool h3_stream_autotune_enabled() {
+    return QUIC_STREAM_MAX_WINDOW_SIZE > QUIC_STREAM_WINDOW_SIZE;
+}
+
+/** True when connection auto-tune can grow past the initial TP. */
+static inline bool h3_connection_autotune_enabled() {
+    return QUIC_CONNECTION_MAX_WINDOW_SIZE > QUIC_CONNECTION_WINDOW_SIZE;
 }

@@ -102,8 +102,9 @@ bool Http3Upstream::open_session(std::optional<Millis>) {
     m_h3_settings.initial_max_stream_data_bidi_remote = QUIC_STREAM_WINDOW_SIZE;
     m_h3_settings.initial_max_stream_data_uni = QUIC_STREAM_WINDOW_SIZE;
     m_h3_settings.initial_max_streams_bidi = QUIC_MAX_STREAMS_NUM;
-    m_h3_settings.max_window = QUIC_CONNECTION_WINDOW_SIZE;
-    m_h3_settings.max_stream_window = QUIC_STREAM_WINDOW_SIZE;
+    // max_* must exceed initial_* or ngtcp2 auto-tune is a no-op (field DL stall).
+    m_h3_settings.max_window = QUIC_CONNECTION_MAX_WINDOW_SIZE;
+    m_h3_settings.max_stream_window = QUIC_STREAM_MAX_WINDOW_SIZE;
 
     // Handoff — reuse connection pre-established by ping (optional fast path)
     if (this->vpn->quic_connector && this->vpn->quic_connector->client) {
@@ -490,9 +491,17 @@ void Http3Upstream::do_health_check(bool need_result) {
         return;
     }
 
-    // Skip CONNECT probe only if **app** path made progress recently (LAN RX / ICMP /
-    // successful probe). Raw QUIC UDP alone is not enough: keepalives can keep a dead
-    // data path looking "busy" and postpone recovery forever (overnight CONNECTED wedge).
+    // Skip CONNECT probe when the child is carrying app streams, or app path made
+    // progress recently. Under multi-H3 bulk, a CONNECT probe competes for the same
+    // QUIC CWND and often times out (7s) even with live tcp_conns — then used to kill
+    // the child mid-test (field: tcp_conns=10 + "closing this H3 upstream").
+    // Raw QUIC UDP alone is still not enough (keepalives can mask a dead data path).
+    if (!need_result && !m_tcp_connections.empty()) {
+        log_upstream(this, dbg,
+                "Health check: skipped ({} live TCP stream(s); need_result=false)",
+                m_tcp_connections.size());
+        return;
+    }
     {
         using clock = std::chrono::steady_clock;
         const auto now_ms =
@@ -587,19 +596,27 @@ void Http3Upstream::report_health_check_error(bool need_result, VpnError error) 
         return;
     }
 
-    // Periodic probe under multi-H3: do not kill a busy child (same policy as H2 multi).
+    // Periodic probe under multi-H3: never kill a child that still has app streams.
+    // Field (OpenWrt multi): HC timed out with tcp_conns=10 but app_progress age was
+    // outside the busy window → closed mid-DL and collapsed throughput. Live mapped
+    // TCP streams are stronger evidence than the CONNECT probe under QUIC load.
+    if (!m_tcp_connections.empty()) {
+        log_upstream(this, warn,
+                "Periodic HC failed but session has live TCP streams (conns={}) — keeping H3 session",
+                m_tcp_connections.size());
+        return;
+    }
     {
         using clock = std::chrono::steady_clock;
         const auto now_ms = duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
         const auto max_age_ms = health_check_busy_skip_max_age_ms(
                 this->vpn->upstream_config.health_check_timeout.count(),
                 this->vpn->upstream_config.timeout.count());
-        if (!m_tcp_connections.empty() && m_last_app_progress_steady_ms.has_value()
-                && now_ms >= *m_last_app_progress_steady_ms
+        if (m_last_app_progress_steady_ms.has_value() && now_ms >= *m_last_app_progress_steady_ms
                 && uint64_t(now_ms - *m_last_app_progress_steady_ms) <= max_age_ms) {
             log_upstream(this, warn,
-                    "Periodic HC failed but session has app traffic (conns={}, app_age_ms={}) — keeping H3 session",
-                    m_tcp_connections.size(), now_ms - *m_last_app_progress_steady_ms);
+                    "Periodic HC failed but recent app progress (app_age_ms={}) — keeping H3 session",
+                    now_ms - *m_last_app_progress_steady_ms);
             return;
         }
     }
