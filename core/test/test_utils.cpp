@@ -27,10 +27,10 @@ TEST(HealthCheckProbeSkip, SkipsWhenRecentAppProgress) {
 
 // Long-lived multi-stream: BDP-sized windows; max > initial enables auto-tune (DL path).
 TEST(QuicLongLivedBounds, WindowsAndUnreadCap) {
-    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 4ull * 1024 * 1024);
-    EXPECT_EQ(QUIC_STREAM_MAX_WINDOW_SIZE, 16ull * 1024 * 1024);
-    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 24ull * 1024 * 1024);
-    EXPECT_EQ(QUIC_CONNECTION_MAX_WINDOW_SIZE, 48ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_STREAM_WINDOW_SIZE, 2ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_STREAM_MAX_WINDOW_SIZE, 8ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_CONNECTION_WINDOW_SIZE, 8ull * 1024 * 1024);
+    EXPECT_EQ(QUIC_CONNECTION_MAX_WINDOW_SIZE, 16ull * 1024 * 1024);
     // Auto-tune ceilings MUST exceed initials — otherwise download stalls at initial BDP.
     EXPECT_TRUE(h3_stream_autotune_enabled());
     EXPECT_TRUE(h3_connection_autotune_enabled());
