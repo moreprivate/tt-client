@@ -8,8 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- Added `http_connections_num` to configure parallel HTTP/2 or HTTP/3 sessions. Default is **5** when omitted or `0`.
-- HTTP/3 multi-session: same parallel-session knob as H2 (`http_connections_num`) opens N independent QUIC/H3 sessions via `UpstreamMultiplexer` for multi-DL parity with H2 multi-5.
+- Added `http_connections_num` to configure parallel HTTP/2 or HTTP/3 sessions. Default is **8** when omitted or `0`.
+- HTTP/3 multi-session: same parallel-session knob as H2 (`http_connections_num`) opens N independent QUIC/H3 sessions via `UpstreamMultiplexer` for multi-DL parity with H2 multi-8.
 
 ### Changed
 

@@ -124,7 +124,7 @@ The configuration file uses TOML format. Below are all available settings.
 | `skip_verification` | bool | `false` | Skip endpoint certificate verification (accepts any cert) |
 | `certificate` | string | `null` | Endpoint certificate in PEM format (uses system store if empty) |
 | `upstream_protocol` | string | `"http2"` | Protocol: `auto`, `http2`, or `http3` (omit key → default **`http2`** — preferred for multi-thread speed). `auto` dual-probes H2 and H3. Prefer `http3` only when measuring tunnel HOL vs TCP or UDP path is required. |
-| `http_connections_num` | int | `0` | Parallel upstream sessions for **H2 or H3**: `0` uses the default (**5**), or set `1` through `8`. H2 = TCP sessions; H3 = independent QUIC connections |
+| `http_connections_num` | int | `0` | Parallel upstream sessions for **H2 or H3**: `0` uses the default (**8**), or set `1` through `8`. H2 = TCP sessions; H3 = independent QUIC connections |
 | `timeout_ms` | int | `0` | Endpoint connect / health cadence base; `0` = library default (30s) |
 | `health_check_timeout_ms` | int | `0` | Fail health check after this many ms → recovery; `0` = 7s. Busy-session HC skip window is `min(this, timeout_ms)`. Raise (e.g. 15000) on bufferbloated last-mile to avoid thrash under load |
 | `anti_dpi` | bool | `false` | Enable anti-DPI (Deep Packet Inspection) measures |

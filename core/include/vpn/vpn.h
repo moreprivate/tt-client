@@ -166,7 +166,7 @@ typedef struct {
     /**
      * Number of parallel HTTP/3 (QUIC) sessions. If 0, default value will be assigned
      * (same default as HTTP/2 multi via UpstreamMultiplexer). Multiple sessions give
-     * independent congestion windows — required for multi-DL parity with H2 multi-5.
+     * independent congestion windows — required for multi-DL parity with H2 multi-session.
      */
     uint32_t connections_num;
 } VpnHttp3UpstreamConfig;
@@ -233,7 +233,7 @@ typedef struct {
     VpnUpstreamProtocol main_protocol;
     /**
      * Number of parallel upstream sessions (HTTP/2 or HTTP/3). If 0, the default value will be used
-     * (UpstreamMultiplexer::DEFAULT_UPSTREAMS_NUM, currently 5).
+     * (UpstreamMultiplexer::DEFAULT_UPSTREAMS_NUM, currently 8).
      * Applies to whichever `main_protocol` is selected (H2 multi TCP sessions or H3 multi QUIC).
      * Config key: `http_connections_num`.
      */

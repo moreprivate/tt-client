@@ -16,7 +16,7 @@ struct UpstreamInfo;
 class UpstreamMultiplexer : public ServerUpstream {
 public:
     // Default parallel upstream sessions (H2 TCP or H3 QUIC) when config is 0 / omitted
-    static constexpr size_t DEFAULT_UPSTREAMS_NUM = 5;
+    static constexpr size_t DEFAULT_UPSTREAMS_NUM = 8;
     // Number of connection exceeding which a new upstream will be opened
     static constexpr size_t NEW_UPSTREAM_CONNECTIONS_NUM_THRESHOLD = 5;
 
