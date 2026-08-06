@@ -25,7 +25,7 @@
 using namespace ag; // NOLINT(google-build-using-namespace)
 
 static constexpr uint32_t DEFAULT_MTU = 1350;
-static constexpr uint32_t MAX_HTTP2_CONNECTIONS_NUM = 8;
+static constexpr uint32_t MAX_HTTP_CONNECTIONS_NUM = 8;
 static const Logger g_logger("TRUSTTUNNEL_CLIENT"); // NOLINT(readability-identifier-naming)
 
 static const std::unordered_map<std::string_view, VpnUpstreamProtocol> UPSTREAM_PROTO_MAP = {
@@ -140,15 +140,15 @@ static std::optional<TrustTunnelConfig::Location> build_endpoint(const toml::tab
     }
     // Missing key: keep default VPN_UP_HTTP2 (struct default).
 
-    if (config.contains("http2_connections_num")) {
-        auto connections_num = config["http2_connections_num"].value<int64_t>();
+    if (config.contains("http_connections_num")) {
+        auto connections_num = config["http_connections_num"].value<int64_t>();
         if (!connections_num || *connections_num < 0
-                || *connections_num > static_cast<int64_t>(MAX_HTTP2_CONNECTIONS_NUM)) {
-            errlog(g_logger, "http2_connections_num must be an integer between 0 and {}",
-                    MAX_HTTP2_CONNECTIONS_NUM);
+                || *connections_num > static_cast<int64_t>(MAX_HTTP_CONNECTIONS_NUM)) {
+            errlog(g_logger, "http_connections_num must be an integer between 0 and {}",
+                    MAX_HTTP_CONNECTIONS_NUM);
             return std::nullopt;
         }
-        location.http2_connections_num = static_cast<uint32_t>(*connections_num);
+        location.http_connections_num = static_cast<uint32_t>(*connections_num);
     }
 
     if (config.contains("timeout_ms")) {
@@ -168,8 +168,13 @@ static std::optional<TrustTunnelConfig::Location> build_endpoint(const toml::tab
         location.health_check_timeout_ms = static_cast<uint32_t>(*v);
     }
 
-    // Parse client random (format: "prefix[/mask]")
-    if (auto client_random = config["client_random"].value<std::string>()) {
+    // Parse client random (format: "prefix[/mask]").
+    // Server export historically used client_random_prefix; client key is client_random.
+    std::optional<std::string> client_random = config["client_random"].value<std::string>();
+    if (!client_random || client_random->empty()) {
+        client_random = config["client_random_prefix"].value<std::string>();
+    }
+    if (client_random && !client_random->empty()) {
         if (auto slash_pos = client_random->find('/'); slash_pos != std::string::npos) {
             location.client_random = client_random->substr(0, slash_pos);
             location.client_random_mask = client_random->substr(slash_pos + 1);

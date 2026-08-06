@@ -78,7 +78,7 @@
      `VpnClient::dns_proxy_listener`. Tunnel knows to route the connections coming from that listener through
      ServerUpstream.
 
-  If the system DNS servers can't be determined, the public AdGuard DNS unfiltered servers are used as upstreams
+  If the system DNS servers can't be determined, Cloudflare public DNS (1.1.1.1 / 1.0.0.1) is used as upstreams
   for the "system" DNS proxy.
 
   If ServerUpstream is not connected to a VPN endpoint, and the kill switch setting is off, then all DNS queries are
