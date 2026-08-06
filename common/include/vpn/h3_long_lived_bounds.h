@@ -34,16 +34,20 @@
 // (no climb/wedge), not matching post-restart cold RSS. musl does not return
 // small-heap pages to the OS; process restart is the only full baseline reset.
 
-// Initial stream RX (advertised in TP) — enough for ~150+ Mbit @ 55 ms without waiting for tune.
-static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 4ul * 1024 * 1024;
-// Auto-tune ceiling (ngtcp2 max_stream_window). MUST be > initial or growth is a no-op.
-// Matches tt-server QuicSettings::default_max_stream_window (16 MiB).
-static constexpr uint64_t QUIC_STREAM_MAX_WINDOW_SIZE = 16ul * 1024 * 1024;
+// OpenWrt field (~240 MiB RAM): old H3 process hit ~144 MiB RSS; upgrade of a
+// 24/48 MiB window binary failed to start with MemAvailable≈5 MiB → script
+// rollback. Keep cold-start small; auto-tune must still grow (max > initial).
+//
+// BDP @ 55 ms: ~1.4 MiB for 200 Mbit, ~2.1 MiB for 300 Mbit — 2 MiB initial
+// stream is enough for first RTTs; max 8 MiB covers headroom without OOM.
+static constexpr uint64_t QUIC_STREAM_WINDOW_SIZE = 2ul * 1024 * 1024;
+// Auto-tune ceiling. MUST be > initial or growth is a no-op (the real DL bug).
+static constexpr uint64_t QUIC_STREAM_MAX_WINDOW_SIZE = 8ul * 1024 * 1024;
 
-// Initial connection RX — multi-stream budget without 100 MiB OpenWrt RSS balloon.
-static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 24ul * 1024 * 1024;
+// Connection initial — multi-stream budget, safe cold start on 256 MiB routers.
+static constexpr uint64_t QUIC_CONNECTION_WINDOW_SIZE = 8ul * 1024 * 1024;
 // Auto-tune ceiling for connection window (must be > initial).
-static constexpr uint64_t QUIC_CONNECTION_MAX_WINDOW_SIZE = 48ul * 1024 * 1024;
+static constexpr uint64_t QUIC_CONNECTION_MAX_WINDOW_SIZE = 16ul * 1024 * 1024;
 
 static constexpr uint64_t QUIC_MAX_STREAMS_NUM = 4ul * 1024;
 
