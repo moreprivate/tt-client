@@ -111,6 +111,7 @@ ag::VpnError ag::quic_connector_connect(
     // max_* must exceed initial_* or ngtcp2 auto-tune is a no-op (field DL stall).
     settings.max_window = QUIC_CONNECTION_MAX_WINDOW_SIZE;
     settings.max_stream_window = QUIC_STREAM_MAX_WINDOW_SIZE;
+    settings.congestion_control_algorithm = ag::http::Http3Settings::BBR;
 
     // Set up callbacks for the ping phase
     ag::http::Http3Client::Callbacks callbacks{
