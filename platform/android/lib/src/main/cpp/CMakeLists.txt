@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 set(ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../)
 
 if(NOT CMAKE_INSTALL_PREFIX MATCHES "conan2")
-    set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES ${ROOT_DIR}/cmake/conan_bootstrap.cmake)
+    set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES ${ROOT_DIR}/cmake/reproducible_conan.cmake)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
