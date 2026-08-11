@@ -17,6 +17,17 @@ else
 PRESET ?= $(COMPILER)-debug
 endif
 
+# BoringSSL's Linux CMake files add -stdlib=libc++ even for Zig/musl.  Zig
+# correctly reports that option as unused; BoringSSL promotes the warning to
+# an error.  Export the suppression so it reaches Conan's nested dependency
+# builds as well as the top-level target.
+ifneq ($(findstring musl-cross,$(PRESET)),)
+export CXXFLAGS := -Wno-unused-command-line-argument $(CXXFLAGS)
+endif
+ifneq ($(filter musl-cross-mips musl-cross-mipsel,$(PRESET)),)
+export CFLAGS := -DBROKEN_CLANG_ATOMICS $(CFLAGS)
+endif
+
 # Each preset configures into ${sourceDir}/cmake-build-${presetName}. Override
 # BUILD_DIR to configure the same preset into several directories, e.g. when
 # building one architecture per directory for a macOS universal binary.
@@ -143,9 +154,11 @@ endif
 ##   make CMAKE_ARGS=-DIPV6_UNAVAILABLE=ON test
 ## Set SKIP_BOOTSTRAP=1 to skip bootstrapping dependencies.
 ## Run `make reconfigure` to apply changed CMAKE_ARGS to a configured tree.
-setup_cmake: $(BUILD_DIR)/CMakeCache.txt
+setup_cmake: $(BUILD_DIR)/.tt-configured
 
-# Configure only when the build directory has no cache yet. Re-running
+# Configure only when the build directory has no successful marker yet. A
+# failed CMake/Conan run may leave CMakeCache.txt behind, so the marker is
+# created only after configure succeeds. Re-running
 # `cmake --preset` over an existing cache breaks the musl cross presets: their
 # compiler is a list (`zig;cc;-target;...`), which CMake stores split into
 # CMAKE_C_COMPILER plus CMAKE_C_COMPILER_ARG1 and then reports as changed,
@@ -154,16 +167,19 @@ setup_cmake: $(BUILD_DIR)/CMakeCache.txt
 # bootstrap_deps is order-only: it is phony, and a normal prerequisite would
 # make the cache look out of date on every run.
 ifeq ($(SKIP_BOOTSTRAP),1)
-$(BUILD_DIR)/CMakeCache.txt: | ensure_venv
+$(BUILD_DIR)/.tt-configured: | ensure_venv
 else
-$(BUILD_DIR)/CMakeCache.txt: | bootstrap_deps
+$(BUILD_DIR)/.tt-configured: | bootstrap_deps
 endif
+	mkdir -p $(BUILD_DIR)
 	cmake --preset $(PRESET) -B $(BUILD_DIR) $(OSX_ARCH_ARGS) $(CMAKE_ARGS) $(CMAKE_CONAN_ARGS)
+	touch $@
 
 .PHONY: reconfigure
 ## Re-run the CMake configure step from scratch, e.g. after changing CMAKE_ARGS.
 reconfigure: ensure_venv
 	rm -f $(BUILD_DIR)/CMakeCache.txt
+	rm -f $(BUILD_DIR)/.tt-configured
 	$(MAKE) setup_cmake
 
 .PHONY: compile_commands

@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.tasks.bundling.Zip
 
 plugins {
     alias(libs.plugins.android.library)
@@ -116,4 +117,12 @@ afterEvaluate {
             }
         }
     }
+}
+
+// AARs are ZIP files.  Gradle otherwise preserves filesystem timestamps and
+// iteration order, making identical native inputs produce different artifacts
+// on different runners.
+tasks.withType<Zip>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }

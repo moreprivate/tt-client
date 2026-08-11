@@ -63,6 +63,11 @@ class VpnLibsConan(ConanFile):
         self.options["dns-libs"].tcpip = False
         if str(self.settings.arch) == "mipsel":
             self.options["openssl"].no_asm = True
+        if "mips" in str(self.settings.arch):
+            # The 32-bit MIPS OpenSSL fallback cannot link its FIPS provider:
+            # Zig's compiler-rt has no __atomic_is_lock_free implementation.
+            # The client does not consume FIPS, so avoid building that provider.
+            self.options["openssl"].no_fips = True
 
     def export(self):
         # The exported sources carry no .git, so the build's git describe would

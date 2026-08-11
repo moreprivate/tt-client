@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 if(NOT CMAKE_INSTALL_PREFIX MATCHES "conan2")
-    set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES "cmake/conan_bootstrap.cmake")
+    set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES "cmake/reproducible_conan.cmake")
 endif()
 project(vpn_libs C CXX)
 
@@ -23,6 +23,11 @@ if (MSVC)
     add_compile_options(/Oy-) # -fno-omit-frame-pointer
 else ()
     add_compile_options(-fno-omit-frame-pointer)
+    # Keep source locations embedded by __FILE__ and debug records stable.
+    add_compile_options(
+        "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=/tt-client"
+        "-fmacro-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=/tt-client"
+    )
 endif ()
 
 if (IPV6_UNAVAILABLE)

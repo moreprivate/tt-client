@@ -129,6 +129,46 @@ def export_conan(repo_dir, version):
     )
     if want.returncode != 0 or want.stdout.strip() != current:
         subprocess.run(["git", "-C", repo_dir, "checkout", rev], check=True)
+    recipe = os.path.join(repo_dir, "conanfile.py")
+    with open(recipe, "r+", encoding="utf-8") as file:
+        text = file.read()
+        marker = "        if \"mips\" in str(self.settings.arch):\n            self.options[\"openssl\"].no_fips = True\n"
+        if "class NativeLibsCommon" in text and marker not in text:
+            text = text.replace("    def configure(self):\n", "    def configure(self):\n" + marker, 1)
+            file.seek(0)
+            file.write(text)
+            file.truncate()
+    # NativeLibsCommon carries the MIPS OpenSSL fallback as a transitive
+    # recipe. Force that recipe's FIPS option off at recipe level: profile
+    # options can be overridden by the transitive requirement graph.
+    for root, _, names in os.walk(repo_dir):
+        if "conanfile.py" not in names or os.path.basename(root) != "openssl":
+            continue
+        openssl_recipe = os.path.join(root, "conanfile.py")
+        with open(openssl_recipe, "r+", encoding="utf-8") as file:
+            text = file.read()
+            text = text.replace(
+                '            if self.settings.get_safe("os.ag_cc_is_zig"):\n',
+                '            if True:\n',
+                1,
+            )
+            marker = "        if \"mips\" in str(self.settings.arch):\n            self.options.no_fips = True\n"
+            if marker not in text and "def config_options(self):" in text:
+                text = text.replace("    def config_options(self):\n", "    def config_options(self):\n" + marker, 1)
+                file.seek(0)
+                file.write(text)
+                file.truncate()
+    for root, _, names in os.walk(repo_dir):
+        if "threads_pthread.c" not in names or os.path.basename(root) != "crypto":
+            continue
+        source = os.path.join(root, "threads_pthread.c")
+        with open(source, "r+", encoding="utf-8") as file:
+            text = file.read()
+            marker = "#if defined(__mips__) && !defined(BROKEN_CLANG_ATOMICS)\n#define BROKEN_CLANG_ATOMICS\n#endif\n"
+            if marker not in text:
+                file.seek(0)
+                file.write(marker + text)
+                file.truncate()
     subprocess.run([os.path.join(repo_dir, "scripts", "export_conan.sh")],
                    check=True, cwd=repo_dir)
 

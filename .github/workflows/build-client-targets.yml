@@ -63,7 +63,7 @@ jobs:
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.build_runner == 'self-hosted' && 'docker-runner' || 'ubuntu-24.04' }}
     timeout-minutes: 360
     container:
-      image: adguard/core-libs:2.12
+      image: adguard/core-libs@sha256:26f7e1c6c19b1e2c90a8938e6c763469787fbaeff94f8c5a887b947aa8858f5e
     env:
       CONAN_HOME: ${{ github.workspace }}/.conan2
       CARGO_HOME: /opt/cargo
@@ -93,7 +93,6 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           pip install --disable-pip-version-check conan
-          conan profile detect --force
 
       - name: Bootstrap build dependencies
         shell: bash
@@ -125,7 +124,7 @@ jobs:
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.build_runner == 'self-hosted' && 'docker-runner' || 'ubuntu-24.04' }}
     timeout-minutes: 360
     container:
-      image: adguard/core-libs:2.12
+      image: adguard/core-libs@sha256:26f7e1c6c19b1e2c90a8938e6c763469787fbaeff94f8c5a887b947aa8858f5e
     env:
       CONAN_HOME: ${{ github.workspace }}/.conan2
       CARGO_HOME: /opt/cargo
@@ -161,7 +160,6 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           pip install --disable-pip-version-check conan
-          conan profile detect --force
           conan list 'dns-libs/*@adguard/oss'
           conan list 'native_libs_common/*@adguard/oss'
           rustup +nightly component add rust-src
@@ -231,7 +229,7 @@ jobs:
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.build_runner == 'self-hosted' && 'docker-runner' || 'ubuntu-24.04' }}
     timeout-minutes: 360
     container:
-      image: adguard/core-libs:2.12
+      image: adguard/core-libs@sha256:26f7e1c6c19b1e2c90a8938e6c763469787fbaeff94f8c5a887b947aa8858f5e
     env:
       CONAN_HOME: ${{ github.workspace }}/.conan2
       CARGO_HOME: /opt/cargo
@@ -250,7 +248,6 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           pip install --disable-pip-version-check conan
-          conan profile detect --force
           SDKMANAGER="$(command -v sdkmanager || true)"
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           if [[ -z "${SDKMANAGER}" ]]; then
@@ -303,7 +300,9 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/android
           printf '%s\n' "${SOURCE_SHA}" > artifacts/android/SOURCE_COMMIT-android
-          tar -C platform/android/lib/build/maven-repo -czf \
+          GZIP=-n tar --sort=name --mtime='UTC 1970-01-01' \
+            --owner=0 --group=0 --numeric-owner \
+            -C platform/android/lib/build/maven-repo -czf \
             "artifacts/android/tt-client-android-${RELEASE_TAG}.tar.gz" .
           (
             cd artifacts/android
