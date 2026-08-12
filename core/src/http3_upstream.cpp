@@ -1092,7 +1092,10 @@ void Http3Upstream::handle_response(uint64_t stream_id, const HttpHeaders *heade
     if (is_health_check_stream(stream_id)) {
         // NOLINTBEGIN(bugprone-unchecked-optional-access)
         if (headers->status_code != HTTP_OK_STATUS) {
-            m_health_check_info->error = {VPN_EC_ERROR, "Bad response code"};
+            log_upstream(this, warn, "Health check CONNECT non-OK status={}", headers->status_code);
+            VpnError e = bad_http_response_to_connect_error(headers);
+            e.code = VPN_EC_ERROR;
+            m_health_check_info->error = e;
         } else {
             // Successful CONNECT probe = real app-level liveness (do not cancel self).
             note_app_progress(/*soft_cancel_hc=*/false);
@@ -1114,7 +1117,13 @@ void Http3Upstream::handle_response(uint64_t stream_id, const HttpHeaders *heade
         conn->flags.set(TcpConnection::TCF_ESTABLISHED);
         this->handler.func(this->handler.arg, SERVER_EVENT_CONNECTION_OPENED, &found.first);
     } else {
-        conn->pending_error = {found.first, bad_http_response_to_connect_error(headers)};
+        VpnError cerr = bad_http_response_to_connect_error(headers);
+        log_conn(this, found.first, warn,
+                "CONNECT failed status={} authority={} err={} ({})",
+                headers->status_code,
+                headers->authority.empty() ? std::string_view{"?"} : std::string_view{headers->authority},
+                safe_to_string_view(cerr.text), cerr.code);
+        conn->pending_error = {found.first, cerr};
     }
 }
 
