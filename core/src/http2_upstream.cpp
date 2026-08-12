@@ -107,7 +107,11 @@ void Http2Upstream::handle_response(const HttpHeadersEvent *http_event) {
         m_icmp_mux.handle_response(http_event->headers);
     } else if (m_health_check_info.has_value() && m_health_check_info->stream_id == stream_id) {
         if (http_event->headers->status_code != HTTP_OK_STATUS) {
-            m_health_check_info->error = {VPN_EC_ERROR, "Bad response code"};
+            log_upstream(this, warn, "Health check CONNECT non-OK status={}",
+                    http_event->headers->status_code);
+            VpnError e = bad_http_response_to_connect_error(http_event->headers);
+            e.code = VPN_EC_ERROR;
+            m_health_check_info->error = e;
         }
     } else {
         auto found = get_conn_by_stream_id(stream_id);
@@ -122,7 +126,14 @@ void Http2Upstream::handle_response(const HttpHeadersEvent *http_event) {
             handler->func(handler->arg, SERVER_EVENT_CONNECTION_OPENED, &found.first);
         } else {
             TcpConnection *conn = found.second;
-            conn->pending_error = {found.first, bad_http_response_to_connect_error(http_event->headers)};
+            VpnError cerr = bad_http_response_to_connect_error(http_event->headers);
+            log_conn(this, found.first, warn,
+                    "CONNECT failed status={} authority={} err={} ({})",
+                    http_event->headers->status_code,
+                    http_event->headers->authority.empty() ? std::string_view{"?"}
+                                                           : std::string_view{http_event->headers->authority},
+                    safe_to_string_view(cerr.text), cerr.code);
+            conn->pending_error = {found.first, cerr};
         }
     }
 }
@@ -933,6 +944,17 @@ size_t Http2Upstream::connections_num() const {
 void Http2Upstream::do_health_check(bool need_result) {
     m_health_check_info.reset(); // Forget about the current health check.
 
+    // Soft (periodic) HC under multi-H2 bulk: never open a CONNECT probe while the
+    // child still has mapped app streams. Field (OpenWrt multi): probe timed out with
+    // tcp_conns=15 and, before need_result was persisted, escalated to full disconnect.
+    // Live streams are stronger liveness evidence than a competing CONNECT probe.
+    if (!need_result && !m_tcp_connections.empty()) {
+        log_upstream(this, dbg,
+                "Health check: skipped ({} live TCP stream(s); need_result=false)",
+                m_tcp_connections.size());
+        return;
+    }
+
     // Same busy-skip policy as H3: skip only on recent **app** progress (not raw TLS RX).
     {
         using clock = std::chrono::steady_clock;
@@ -981,6 +1003,9 @@ void Http2Upstream::do_health_check(bool need_result) {
         return;
     }
 
+    // MUST set need_result: default is true. Soft periodic HC (need_result=false) that
+    // times out would otherwise escalate to SERVER_EVENT_HEALTH_CHECK_ERROR → full VPN
+    // disconnect (field: start need_result=false, timeout need_result=true, tcp_conns=15).
     m_health_check_info = HealthCheckInfo{
             .stream_id = stream_id.value(),
             .timeout_task_id = event_loop::schedule(this->vpn->parameters.ev_loop,
@@ -997,6 +1022,7 @@ void Http2Upstream::do_health_check(bool need_result) {
                             },
                     },
                     this->vpn->upstream_config.health_check_timeout),
+            .need_result = need_result,
     };
 }
 
@@ -1052,21 +1078,27 @@ void Http2Upstream::report_health_check_error(bool need_result, ag::VpnError err
         return;
     }
 
-    // Periodic probe: do not kill a session that is actively carrying app traffic.
-    // Soft-wedge + CONNECT-probe timeout under bulk used to drop H2 children mid-DL
-    // and cascade into multi collapse / full recovery.
+    // Periodic probe under multi-H2: never kill a child that still has app streams.
+    // Field: HC timed out with tcp_conns=15 but was treated as hard fail (need_result bug)
+    // or closed because inbound age was outside the busy window mid-DL. Live mapped
+    // TCP streams are stronger evidence than the CONNECT probe under bulk load.
+    if (!m_tcp_connections.empty()) {
+        log_upstream(this, warn,
+                "Periodic HC failed but session has live TCP streams (conns={}) — keeping H2 session",
+                m_tcp_connections.size());
+        return;
+    }
     {
         using clock = std::chrono::steady_clock;
         const auto now_ms = duration_cast<milliseconds>(clock::now().time_since_epoch()).count();
         const auto max_age_ms = health_check_busy_skip_max_age_ms(
                 this->vpn->upstream_config.health_check_timeout.count(),
                 this->vpn->upstream_config.timeout.count());
-        if (!m_tcp_connections.empty() && m_last_inbound_steady_ms.has_value()
-                && now_ms >= *m_last_inbound_steady_ms
+        if (m_last_inbound_steady_ms.has_value() && now_ms >= *m_last_inbound_steady_ms
                 && uint64_t(now_ms - *m_last_inbound_steady_ms) <= max_age_ms) {
             log_upstream(this, warn,
-                    "Periodic HC failed but session has app traffic (conns={}, inbound_age_ms={}) — keeping H2 session",
-                    m_tcp_connections.size(), now_ms - *m_last_inbound_steady_ms);
+                    "Periodic HC failed but recent inbound (inbound_age_ms={}) — keeping H2 session",
+                    now_ms - *m_last_inbound_steady_ms);
             return;
         }
     }

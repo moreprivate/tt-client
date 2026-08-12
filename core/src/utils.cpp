@@ -1,5 +1,9 @@
 #include <algorithm>
+#include <array>
 #include <numeric>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "common/base64.h"
@@ -161,14 +165,37 @@ enum VpnWarnCode {
 };
 
 VpnError bad_http_response_to_connect_error(const HttpHeaders *response) {
-    VpnError err = {ag::utils::AG_ECONNREFUSED, "Bad response status"};
-    if (response->status_code != HTTP_STATUS_502_BAD_GATEWAY) {
+    // VpnError::text is const char* (no ownership). Use a small ring of thread-local
+    // strings so concurrent pending CONNECT failures on the event loop keep distinct
+    // messages until SERVER_EVENT_ERROR is delivered (was always "Bad response status").
+    static thread_local std::array<std::string, 32> text_ring;
+    static thread_local size_t text_ring_i = 0;
+    std::string &text = text_ring[text_ring_i++ % text_ring.size()];
+
+    const int status = response != nullptr ? response->status_code : 0;
+    std::optional<std::string_view> warning;
+    std::optional<std::string_view> vpn_error_host;
+    if (response != nullptr) {
+        warning = response->get_field("X-Warning");
+        vpn_error_host = response->get_field("X-Adguard-Vpn-Error");
+    }
+
+    if (vpn_error_host.has_value() && !vpn_error_host->empty()) {
+        text = AG_FMT("Bad response status {} X-Adguard-Vpn-Error={}", status, *vpn_error_host);
+    } else if (warning.has_value() && !warning->empty()) {
+        text = AG_FMT("Bad response status {} X-Warning={}", status, *warning);
+    } else {
+        text = AG_FMT("Bad response status {}", status);
+    }
+
+    VpnError err = {ag::utils::AG_ECONNREFUSED, text.c_str()};
+    if (response == nullptr || response->status_code != HTTP_STATUS_502_BAD_GATEWAY) {
         return err;
     }
 
-    if (auto vpn_error = response->get_field("X-Adguard-Vpn-Error")) {
-        // do nothing - DNS resolution error, just return refused
-    } else if (auto warning = response->get_field("X-Warning")) {
+    if (vpn_error_host.has_value()) {
+        // DNS resolution error, keep refused
+    } else if (warning.has_value()) {
         if (auto code = ag::utils::to_integer<int>(*warning)) {
             switch (*code) {
             case HOST_UNREACHABLE:
