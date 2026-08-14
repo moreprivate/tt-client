@@ -51,7 +51,7 @@
 #include <sys/resource.h>
 #endif
 
-static constexpr std::string_view DEFAULT_CONFIG_FILE = "trusttunnel_client.toml";
+static constexpr std::string_view DEFAULT_CONFIG_FILE = "tt-client.toml";
 
 using namespace ag;
 
@@ -59,6 +59,8 @@ static const ag::Logger g_logger("TRUSTTUNNEL_CLIENT_APP");
 static std::atomic_bool keep_running{true};
 // Set when process is intentionally stopping (SIGTERM/SIGINT); skip reconnect.
 static std::atomic_bool g_shutting_down{false};
+// CLI metadata commands exit normally and must not emit a crash-style dump.
+static std::atomic_bool g_skip_atexit_dump{false};
 static std::condition_variable g_waiter;
 static std::mutex g_waiter_mutex;
 static std::weak_ptr<TrustTunnelClient> g_client;
@@ -97,7 +99,7 @@ static void note_event(const char *fmt, ...) {
             (unsigned long long) ++g_event_seq, buf);
     errlog(g_logger, "EVENT {}", g_last_event);
     // Force visibility even if logger level is wrong.
-    std::fprintf(stderr, "trusttunnel_client EVENT %s\n", g_last_event);
+    std::fprintf(stderr, "tt-client EVENT %s\n", g_last_event);
     std::fflush(stderr);
 }
 
@@ -165,7 +167,7 @@ static void dump_process_diagnostics(const char *why) {
     const int pid = 0;
 #endif
     std::fprintf(stderr,
-            "\n========== trusttunnel_client DEATH_DUMP begin why=%s pid=%d last_event=%s wall_ms=%lld ==========\n",
+            "\n========== tt-client DEATH_DUMP begin why=%s pid=%d last_event=%s wall_ms=%lld ==========\n",
             why ? why : "?", pid, g_last_event, (long long) ms);
     errlog(g_logger, "DEATH_DUMP begin why={} pid={} last_event={}", why ? why : "?", pid, g_last_event);
 
@@ -211,7 +213,7 @@ static void dump_process_diagnostics(const char *why) {
     dump_file_to_stderr("/proc/self/maps", "maps_head", 2048);
 #endif
 
-    std::fprintf(stderr, "========== trusttunnel_client DEATH_DUMP end why=%s ==========\n\n", why ? why : "?");
+    std::fprintf(stderr, "========== tt-client DEATH_DUMP end why=%s ==========\n\n", why ? why : "?");
     std::fflush(stderr);
     errlog(g_logger, "DEATH_DUMP end why={}", why ? why : "?");
 }
@@ -241,16 +243,18 @@ static void dump_process_diagnostics_signal_safe(int /*sig*/) {
 }
 #endif
 
-static void stop_trusttunnel_client(const char *why = "stop_trusttunnel_client") {
+static void stop_tt_client(const char *why = "stop_tt_client") {
     g_shutting_down.store(true);
-    note_event("stop_trusttunnel_client: %s", why ? why : "unspecified");
-    dump_process_diagnostics(why ? why : "stop_trusttunnel_client");
+    note_event("stop_tt_client: %s", why ? why : "unspecified");
+    dump_process_diagnostics(why ? why : "stop_tt_client");
     keep_running = false;
     g_waiter.notify_all();
 }
 
 static void on_atexit_dump() {
-    // If we are exiting the process, always leave a dump in logread.
+    if (g_skip_atexit_dump.load()) {
+        return;
+    }
     dump_process_diagnostics("atexit");
 }
 
@@ -273,7 +277,7 @@ static void sighandler(int sig) {
 #endif
         char why[64];
         std::snprintf(why, sizeof(why), "signal_%d", sig);
-        stop_trusttunnel_client(why);
+        stop_tt_client(why);
     } else {
         dump_process_diagnostics("signal_no_client");
         exit(1);
@@ -309,7 +313,7 @@ static void fatal_signal_handler(int sig, siginfo_t *info, void *ucontext) {
         name = "SIGILL";
     }
 
-    const char head[] = "\n========== trusttunnel_client FATAL_SIGNAL ";
+    const char head[] = "\n========== tt-client FATAL_SIGNAL ";
     (void) write(STDERR_FILENO, head, sizeof(head) - 1);
     (void) write(STDERR_FILENO, name, strlen(name));
     const char mid[] = " last_event=";
@@ -382,7 +386,7 @@ static void setup_sighandler() {
 int main(int argc, char **argv) {
     setup_sighandler();
 
-    cxxopts::Options args("trusttunnel_client", "TrustTunnel console client");
+    cxxopts::Options args("tt-client", "MorePrivate tt-client console client");
     // clang-format off
     args.add_options()
             ("v,version", "Print version")
@@ -401,11 +405,13 @@ int main(int argc, char **argv) {
 
     auto result = args.parse(argc, argv);
     if (result.count("version")) {
+        g_skip_atexit_dump.store(true);
         std::cout << args.program() << " " TRUSTTUNNEL_VERSION << '\n';
         return 0;
     }
 
     if (result.count("help")) {
+        g_skip_atexit_dump.store(true);
         // `{""}` mean print only options from default options group
         std::cout << args.help({""}) << '\n';
         return 1;
@@ -609,14 +615,14 @@ static std::function<void(VpnStateChangedEvent *)> get_state_changed_callback() 
                 break;
             }
             if (is_fatal_disconnect_error(code)) {
-                stop_trusttunnel_client("fatal_disconnect");
+                stop_tt_client("fatal_disconnect");
             } else if (auto client = g_client.lock()) {
                 warnlog(g_logger,
                         "Non-fatal disconnect (code={}) — in-process reconnect (keep process/tun alive)", code);
                 note_event("request_reconnect after non-fatal DISCONNECTED code=%d", code);
                 client->request_reconnect();
             } else {
-                stop_trusttunnel_client("disconnect_no_client");
+                stop_tt_client("disconnect_no_client");
             }
             break;
         }
@@ -714,7 +720,7 @@ static void WINAPI service_ctrl_handler(DWORD ctrl_code) {
     case SERVICE_CONTROL_STOP:
     case SERVICE_CONTROL_SHUTDOWN:
         report_service_status(SERVICE_STOP_PENDING, NO_ERROR, 5000);
-        stop_trusttunnel_client();
+        stop_tt_client();
         break;
     case SERVICE_CONTROL_INTERROGATE:
         report_service_status(g_service_status.dwCurrentState, NO_ERROR, 0);
