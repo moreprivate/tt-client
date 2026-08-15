@@ -603,7 +603,13 @@ bool ag::DnsHandler::update_parameters(DnsHandlerParameters parameters) {
     }
     log_handler(this, dbg, "Restarting DNS proxy with new parameters");
     m_parameters = std::move(parameters);
-    return start_dns_proxy();
+    if (!start_dns_proxy()) {
+        return false;
+    }
+    // Endpoint parameters (including encrypted DNS upstreams) can arrive
+    // after the initial system proxy was created. Recreate it as well so the
+    // host resolver does not remain pointed at the initial plain fallback.
+    return start_system_dns_proxy();
 }
 
 bool ag::DnsHandler::start_dns_proxy() {
@@ -625,7 +631,11 @@ bool ag::DnsHandler::start_dns_proxy() {
     }
 
     m_dns_proxy = std::make_unique<DnsProxyAccessor>(
-            DnsProxyAccessor::Parameters{.upstreams = std::move(m_parameters.dns_upstreams),
+            // Keep the configured upstreams available for the system DNS proxy
+            // fallback.  The user proxy and system proxy are independent
+            // listeners, and both must retain the full resolver URL (including
+            // tls://), not just a consumed/moved copy.
+            DnsProxyAccessor::Parameters{.upstreams = m_parameters.dns_upstreams,
                     .socks_listener_address = m_parameters.dns_proxy_listener_address,
                     .socks_listener_username = m_parameters.dns_proxy_listener_username,
                     .socks_listener_password = m_parameters.dns_proxy_listener_password,
@@ -670,7 +680,15 @@ bool ag::DnsHandler::start_dns_proxy() {
 bool ag::DnsHandler::start_system_dns_proxy() {
     SystemDnsServers servers = dns_manager_get_system_servers(ServerUpstream::vpn->parameters.network_manager->dns);
 
-    if (servers.main.empty()) {
+    // The host resolver may have been read before the tunnel was started and
+    // can therefore contain stale/plain servers. When encrypted upstreams
+    // are configured, they are authoritative for the system proxy too.
+    if (!m_parameters.dns_upstreams.empty()) {
+        servers.main.clear();
+        for (const auto &upstream : m_parameters.dns_upstreams) {
+            servers.main.emplace_back(SystemDnsServer{.address = upstream.address});
+        }
+    } else if (servers.main.empty()) {
         log_handler(this, info, "System DNS servers empty");
         servers = {};
         for (std::string_view address : AG_UNFILTERED_DNS_IPS_V4) {
