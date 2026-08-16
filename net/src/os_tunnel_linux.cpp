@@ -218,16 +218,27 @@ bool ag::VpnLinuxTunnel::setup_routes(int16_t table_id) {
         ipv6_routes.clear();
     }
 
+    // Tell the kernel which address to use for packets selected by this
+    // policy table.  Without an explicit preferred source Linux may choose
+    // the address of the physical interface (for example 192.168.x.x) for
+    // locally-generated traffic.  Such packets are then injected into tun0
+    // with the wrong source and cannot be routed through the tunnel.
+    const auto ipv4_address = tunnel_utils::get_address_for_index(m_settings->ipv4_address, m_if_index);
+    const auto ipv4_source = ipv4_address.get_address_as_string();
+
     for (auto &route : ipv4_routes) {
         if (!sys_cmd_netns(
-                    m_netns, AG_FMT("ip ro add {} dev {} table {}", route.to_string(), m_tun_name, table_name))) {
+                    m_netns,
+                    AG_FMT("ip ro add {} dev {} src {} table {}", route.to_string(), m_tun_name, ipv4_source,
+                            table_name))) {
             auto splitted = route.split();
             if (!splitted
                     || !sys_cmd_netns(m_netns,
-                            AG_FMT("ip ro add {} dev {} table {}", splitted->first.to_string(), m_tun_name, table_name))
+                            AG_FMT("ip ro add {} dev {} src {} table {}", splitted->first.to_string(), m_tun_name,
+                                    ipv4_source, table_name))
                     || !sys_cmd_netns(m_netns,
-                            AG_FMT("ip ro add {} dev {} table {}", splitted->second.to_string(), m_tun_name,
-                                    table_name))) {
+                            AG_FMT("ip ro add {} dev {} src {} table {}", splitted->second.to_string(), m_tun_name,
+                                    ipv4_source, table_name))) {
                 return false;
             }
         }
