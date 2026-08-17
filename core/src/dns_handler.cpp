@@ -681,9 +681,14 @@ bool ag::DnsHandler::start_system_dns_proxy() {
     SystemDnsServers servers = dns_manager_get_system_servers(ServerUpstream::vpn->parameters.network_manager->dns);
 
     // The host resolver may have been read before the tunnel was started and
-    // can therefore contain stale/plain servers. When encrypted upstreams
-    // are configured, they are authoritative for the system proxy too.
-    if (!m_parameters.dns_upstreams.empty()) {
+    // can therefore contain stale/plain servers. Explicit encrypted resolver
+    // URLs are authoritative for the system proxy too; plain IP upstreams are
+    // user-proxy configuration and must not replace the system resolver list.
+    const bool has_encrypted_upstream =
+            std::any_of(m_parameters.dns_upstreams.begin(), m_parameters.dns_upstreams.end(), [](const auto &upstream) {
+                return upstream.address.find("://") != std::string::npos;
+            });
+    if (has_encrypted_upstream) {
         servers.main.clear();
         for (const auto &upstream : m_parameters.dns_upstreams) {
             servers.main.emplace_back(SystemDnsServer{.address = upstream.address});
