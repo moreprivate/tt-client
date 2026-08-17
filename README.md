@@ -18,8 +18,9 @@ the Flutter application is in
 - Android Maven/AAR packaging consumed by `tt-mobile`
 
 This repository does not derive country lists or configure a router. Country
-split routing, dnsmasq, UCI, LAN forwarding, and OpenWrt fail-closed policy
-are implemented by `tt-manage/tt-client-openwrt.sh`.
+split routing, OpenWrt dnsmasq/UCI/LAN forwarding, and OpenWrt fail-closed
+policy are implemented by `tt-manage/tt-client-openwrt.sh`. The Linux manager
+uses a separate dedicated local dnsmasq instance for host DNS.
 
 ## Use a release
 
