@@ -1,6 +1,6 @@
-# TrustTunnel client
+# MorePrivate tt-client
 
-`tt-client` contains the native TrustTunnel client libraries, platform
+[tt-client](https://github.com/moreprivate/tt-client) contains the native TrustTunnel client libraries, platform
 adapters, and console client. It connects to a self-hosted
 [tt-server](https://github.com/moreprivate/tt-server) and can carry TCP, UDP,
 and ICMP traffic through a system tunnel or local SOCKS5 listener.
@@ -63,7 +63,7 @@ credentials, certificate verification, transport, and connection count:
 
 ```toml
 upstream_protocol = "http2"       # auto, http2, or http3
-http_connections_num = 0          # client default when zero
+http_connections_num = 0          # client default when zero (0 = 8)
 ```
 
 Do not disable certificate verification in production. See
