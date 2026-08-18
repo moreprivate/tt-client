@@ -134,7 +134,9 @@ endif
 ## Skips if all dependencies are already resolved in the local Conan cache.
 bootstrap_deps: ensure_venv
 	@set -e; \
-	if conan graph info . --profile:host=default >/dev/null 2>&1; then \
+	if conan graph info . \
+		--profile:host=scripts/conan-profiles/build-linux \
+		--profile:build=scripts/conan-profiles/build-linux >/dev/null 2>&1; then \
 		echo "Conan dependencies already bootstrapped, skipping."; \
 	else \
 		$(MAKE) do_bootstrap_deps; \
