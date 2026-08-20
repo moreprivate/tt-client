@@ -132,7 +132,10 @@ set(RUST_WORKSPACE_TARGET_DIR ${CMAKE_CURRENT_BINARY_DIR}/rust_workspace)
 set(DEEPLINK_FFI_STATICLIB_NAME ${CMAKE_STATIC_LIBRARY_PREFIX}trusttunnel_deeplink_ffi${CMAKE_STATIC_LIBRARY_SUFFIX})
 set(DEEPLINK_FFI_LIBNAME ${DEEPLINK_FFI_STATICLIB_NAME})
 
-set(CARGO_ENV_RUSTFLAGS "RUSTFLAGS=")
+# Preserve caller-supplied remapping flags.  The release chain sets these for
+# reproducible source and dependency paths; platform-specific settings append
+# rather than discard them.
+set(CARGO_ENV_RUSTFLAGS "RUSTFLAGS=$ENV{RUSTFLAGS}")
 if (ANDROID)
     if (ANDROID_ABI STREQUAL "arm64-v8a")
         set(CARGO_TARGET ndk --target=aarch64-linux-android --platform=21 build)
@@ -194,7 +197,7 @@ if (WIN32 AND MSVC)
 
     set(CARGO_TARGET --target ${RUST_TARGET_TRIPLE})
     set(TARGET_SUBDIR "${RUST_TARGET_TRIPLE}/${TARGET_SUBDIR}")
-    set(CARGO_ENV_RUSTFLAGS RUSTFLAGS=-Ctarget-feature=+crt-static)
+    string(APPEND CARGO_ENV_RUSTFLAGS " -Ctarget-feature=+crt-static")
 endif ()
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux")
@@ -225,7 +228,7 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
         set(CARGO_TARGET --target ${RUST_TARGET_TRIPLE})
         set(TARGET_SUBDIR "${RUST_TARGET_TRIPLE}/${TARGET_SUBDIR}")
         set(CARGO_ENV_CC CC=${TT_C_COMPILER})
-        set(CARGO_ENV_RUSTFLAGS "RUSTFLAGS=-Clinker=${TT_C_COMPILER} -Ctarget-feature=+crt-static -Clink-self-contained=no -Clink-arg=-no-pie")
+        string(APPEND CARGO_ENV_RUSTFLAGS " -Clinker=${TT_C_COMPILER} -Ctarget-feature=+crt-static -Clink-self-contained=no -Clink-arg=-no-pie")
 
         if (TT_C_COMPILER_IS_ZIG)
             # TT_C_COMPILER is the zig wrapper (`<zig triple>-cc`), which already
@@ -252,9 +255,10 @@ if (ANDROID)
             UPDATE_COMMAND ""
             PATCH_COMMAND ""
             CONFIGURE_COMMAND ""
-            BUILD_COMMAND ${CMAKE_COMMAND} -E env CARGO_BUILD_TARGET_DIR=${RUST_WORKSPACE_TARGET_DIR} TT_CLIENT_VERSION=${TT_CLIENT_VERSION_FULL} ${ANDROID_HOME_VAR}
+            BUILD_COMMAND ${CMAKE_COMMAND} -E env CARGO_BUILD_TARGET_DIR=${RUST_WORKSPACE_TARGET_DIR} TT_CLIENT_VERSION=${TT_CLIENT_VERSION_FULL} ${ANDROID_HOME_VAR} "${CARGO_ENV_RUSTFLAGS}"
             cargo ${CARGO_TARGET}
             ${CARGO_BUILD_TYPE}
+            --locked
             --package trusttunnel-deeplink-ffi
             TEST_COMMAND ""
             INSTALL_COMMAND ""
@@ -269,7 +273,7 @@ else ()
             PATCH_COMMAND ""
             CONFIGURE_COMMAND ""
             BUILD_COMMAND ${CMAKE_COMMAND} -E env CARGO_BUILD_TARGET_DIR=${RUST_WORKSPACE_TARGET_DIR} TT_CLIENT_VERSION=${TT_CLIENT_VERSION_FULL} ${CARGO_ENV_CC} "${CARGO_ENV_RUSTFLAGS}" ${CARGO_ENV_CC_NO_DEFAULTS}
-            cargo ${CARGO_CHANNEL} build ${CARGO_EXTRA_ARGS}
+            cargo ${CARGO_CHANNEL} build --locked ${CARGO_EXTRA_ARGS}
             --manifest-path=<SOURCE_DIR>/Cargo.toml ${CARGO_BUILD_TYPE} ${CARGO_TARGET}
             --workspace
             TEST_COMMAND ""

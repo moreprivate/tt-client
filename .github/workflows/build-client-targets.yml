@@ -67,6 +67,7 @@ jobs:
     env:
       CONAN_HOME: ${{ github.workspace }}/.conan2
       CARGO_HOME: /opt/cargo
+      RUSTFLAGS: --remap-path-prefix=/__w/tt-client/tt-client=/tt-client --remap-path-prefix=/workspace/tt-client=/tt-client --remap-path-prefix=/opt/cargo=/cargo
 
     steps:
       - name: Check out source ref
@@ -92,7 +93,7 @@ jobs:
         run: |
           python3 -m venv .venv
           . .venv/bin/activate
-          pip install --disable-pip-version-check conan
+          pip install --disable-pip-version-check conan==2.31.2
 
       - name: Bootstrap build dependencies
         shell: bash
@@ -128,6 +129,7 @@ jobs:
     env:
       CONAN_HOME: ${{ github.workspace }}/.conan2
       CARGO_HOME: /opt/cargo
+      RUSTFLAGS: --remap-path-prefix=/__w/tt-client/tt-client=/tt-client --remap-path-prefix=/workspace/tt-client=/tt-client --remap-path-prefix=/opt/cargo=/cargo
     strategy:
       fail-fast: false
       matrix:
@@ -159,7 +161,7 @@ jobs:
         run: |
           python3 -m venv .venv
           . .venv/bin/activate
-          pip install --disable-pip-version-check conan
+          pip install --disable-pip-version-check conan==2.31.2
           conan list 'dns-libs/*@adguard/oss'
           conan list 'native_libs_common/*@adguard/oss'
           rustup +nightly component add rust-src
@@ -233,6 +235,7 @@ jobs:
     env:
       CONAN_HOME: ${{ github.workspace }}/.conan2
       CARGO_HOME: /opt/cargo
+      RUSTFLAGS: --remap-path-prefix=/__w/tt-client/tt-client=/tt-client --remap-path-prefix=/workspace/tt-client=/tt-client --remap-path-prefix=/opt/cargo=/cargo
 
     steps:
       - name: Check out source ref
@@ -247,7 +250,7 @@ jobs:
           set -euo pipefail
           python3 -m venv .venv
           . .venv/bin/activate
-          pip install --disable-pip-version-check conan
+          pip install --disable-pip-version-check conan==2.31.2
           SDKMANAGER="$(command -v sdkmanager || true)"
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           if [[ -z "${SDKMANAGER}" ]]; then
@@ -276,7 +279,7 @@ jobs:
             'ndk;29.0.14206865' 'cmake;3.31.6'
           rustup target add aarch64-linux-android armv7-linux-androideabi \
             x86_64-linux-android i686-linux-android
-          cargo install --locked cargo-ndk
+          cargo install --locked --version 3.5.4 cargo-ndk
           ./scripts/bootstrap_conan_deps.py
 
       - name: Build and publish Android library
@@ -300,6 +303,9 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/android
           printf '%s\n' "${SOURCE_SHA}" > artifacts/android/SOURCE_COMMIT-android
+          find platform/android/lib/build/maven-repo \
+            \( -name maven-metadata.xml -o -name maven-metadata.xml.sha1 -o -name maven-metadata.xml.md5 \
+               -o -name maven-metadata.xml.sha256 -o -name maven-metadata.xml.sha512 \) -delete
           GZIP=-n tar --sort=name --mtime='UTC 1970-01-01' \
             --owner=0 --group=0 --numeric-owner \
             -C platform/android/lib/build/maven-repo -czf \

@@ -4,6 +4,9 @@
 #   make PRESET=clang-debug-sanitizer test
 #   make PRESET=musl-cross-mips-relwithdebinfo build_and_export_bin
 BUILD_TYPE ?= release
+CONAN_VERSION ?= 2.31.2
+CONAN_HOME ?= $(HOME)/.conan2
+export CONAN_HOME
 
 ifeq ($(OS), Windows_NT)
 COMPILER ?= msvc
@@ -122,24 +125,26 @@ else
 	    || { echo "error: venv still has no pip after recreate" >&2; exit 1; }; \
 	fi; \
 	'$(VENV_PY)' -m pip install --disable-pip-version-check -q -r requirements.txt; \
-	if [ ! -x '$(VENV_CONAN)' ] || ! '$(VENV_CONAN)' --version >/dev/null 2>&1; then \
-	  '$(VENV_PY)' -m pip install --disable-pip-version-check -q --force-reinstall 'conan>=2.0.5'; \
+	if [ ! -x '$(VENV_CONAN)' ] || ! '$(VENV_CONAN)' --version | grep -Fqx 'Conan version $(CONAN_VERSION)'; then \
+	  '$(VENV_PY)' -m pip install --disable-pip-version-check -q --force-reinstall 'conan==$(CONAN_VERSION)'; \
 	fi; \
-	'$(VENV_CONAN)' --version >/dev/null \
-	  || { echo "error: conan missing in $(VENV) after install" >&2; exit 1; }
+	'$(VENV_CONAN)' --version | grep -Fqx 'Conan version $(CONAN_VERSION)' \
+	  || { echo "error: need Conan $(CONAN_VERSION) in $(VENV)" >&2; exit 1; }
 endif
 
 .PHONY: bootstrap_deps
 ## Export all the required conan packages to the local cache.
-## Skips if all dependencies are already resolved in the local Conan cache.
+## A successful graph query only proves that recipes can be resolved; it does
+## not prove their pinned local exports are in this cache.  In particular,
+## NativeLibsCommon supplies target toolchains that are part of our build.
 bootstrap_deps: ensure_venv
 	@set -e; \
-	if conan graph info . \
-		--profile:host=scripts/conan-profiles/build-linux \
-		--profile:build=scripts/conan-profiles/build-linux >/dev/null 2>&1; then \
+	stamp="$${CONAN_HOME:?CONAN_HOME is required}/.tt-client-bootstrap-complete"; \
+	if [ -f "$$stamp" ]; then \
 		echo "Conan dependencies already bootstrapped, skipping."; \
 	else \
 		$(MAKE) do_bootstrap_deps; \
+		touch "$$stamp"; \
 	fi
 
 .PHONY: do_bootstrap_deps
