@@ -849,8 +849,22 @@ elseif(WIN32)
 else()
     set(_SELECTED_PROFILE "default")
 endif()
-# Install custom config
-conan_config_install(${CMAKE_CURRENT_LIST_DIR}/../conan/settings_user.yml)
+# Install custom settings.  Conan 2.31 rejects a direct single-file
+# `conan config install settings_user.yml` invocation with type-deduction
+# errors, while settings_user.yml is natively loaded from Conan's home.
+find_program(CONAN_COMMAND "conan" REQUIRED)
+set(_CONAN_SETTINGS_USER "${CMAKE_CURRENT_LIST_DIR}/../conan/settings_user.yml")
+execute_process(
+        COMMAND ${CONAN_COMMAND} config home
+        RESULT_VARIABLE _CONAN_HOME_RESULT
+        OUTPUT_VARIABLE _CONAN_HOME
+        ERROR_VARIABLE _CONAN_HOME_ERROR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT "${_CONAN_HOME_RESULT}" STREQUAL "0" OR "${_CONAN_HOME}" STREQUAL "")
+    message(FATAL_ERROR "Unable to determine Conan home: ${_CONAN_HOME_ERROR}")
+endif()
+file(MAKE_DIRECTORY "${_CONAN_HOME}")
+file(COPY_FILE "${_CONAN_SETTINGS_USER}" "${_CONAN_HOME}/settings_user.yml" ONLY_IF_DIFFERENT)
 
 # Configurable variables for Conan profiles.  The build context is deliberately
 # checked in: Conan's detected build profile is runner-dependent and contributes
