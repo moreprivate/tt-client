@@ -1,0 +1,6 @@
+include(reproducible-paths)
+[settings]
+os.ag_profile_version=3
+[conf]
+tools.cmake.cmaketoolchain:user_toolchain+={{profile_dir}}/linux-musl.toolchain.cmake
+tools.cmake.cmaketoolchain:generator=Ninja

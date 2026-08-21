@@ -821,7 +821,7 @@ if(_CONAN_ZIG_C_COMMAND)
 endif()
 
 # Detect conan profile to use
-set(_PROFILES_DIR ${CMAKE_CURRENT_LIST_DIR}/../conan/profiles)
+set(_PROFILES_DIR ${CMAKE_CURRENT_LIST_DIR}/../scripts/conan-profiles)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if (_C_COMPILER_COMMAND MATCHES ".*-musl(eabi)?-.*")
         if(SANITIZE)

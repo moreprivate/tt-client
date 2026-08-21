@@ -1,0 +1,4 @@
+[conf]
+# Keep diagnostics containing __FILE__ independent of the checkout location.
+tools.build:cflags=["-ffile-prefix-map=/__w/tt-client/tt-client=/tt-client", "-fmacro-prefix-map=/__w/tt-client/tt-client=/tt-client", "-ffile-prefix-map=/workspace/tt-client=/tt-client", "-fmacro-prefix-map=/workspace/tt-client=/tt-client"]
+tools.build:cxxflags=["-ffile-prefix-map=/__w/tt-client/tt-client=/tt-client", "-fmacro-prefix-map=/__w/tt-client/tt-client=/tt-client", "-ffile-prefix-map=/workspace/tt-client=/tt-client", "-fmacro-prefix-map=/workspace/tt-client=/tt-client"]

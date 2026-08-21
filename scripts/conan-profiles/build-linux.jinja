@@ -1,0 +1,15 @@
+# The build context is always the Linux toolchain in the pinned CI/container
+# image.  Do not derive this profile from the runner: Conan includes build
+# settings in package IDs, so profile detection makes otherwise identical
+# builds select different binaries.
+include(reproducible-paths)
+[settings]
+os=Linux
+arch=x86_64
+compiler=clang
+compiler.version=22
+compiler.cppstd=20
+compiler.libcxx=libc++
+
+[conf]
+tools.cmake.cmaketoolchain:generator=Ninja
