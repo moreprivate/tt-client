@@ -853,7 +853,7 @@ endif()
 # `conan config install settings_user.yml` invocation with type-deduction
 # errors, while settings_user.yml is natively loaded from Conan's home.
 find_program(CONAN_COMMAND "conan" REQUIRED)
-set(_CONAN_SETTINGS_USER "${CMAKE_CURRENT_LIST_DIR}/../conan/settings_user.yml")
+set(_CONAN_SETTINGS_USER "${CMAKE_CURRENT_LIST_DIR}/../scripts/conan-profiles/settings_user.yml")
 execute_process(
         COMMAND ${CONAN_COMMAND} config home
         RESULT_VARIABLE _CONAN_HOME_RESULT
